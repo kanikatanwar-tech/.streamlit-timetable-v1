@@ -1,0 +1,162 @@
+{
+  "config": {
+    "school_name": "Demo Secondary School",
+    "working_days": 5,
+    "periods_per_day": 8,
+    "periods_first_half": 4,
+    "classes": {
+      "6": 2,
+      "7": 2,
+      "8": 2,
+      "9": 1,
+      "10": 1,
+      "11": 0,
+      "12": 0
+    }
+  },
+  "class_config": {
+    "6A": {
+      "teacher": "Mrs. Sharma",
+      "teacher_period": 1,
+      "subjects": [
+        {"name": "English", "teacher": "Mrs. Sharma", "periods": 5, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "Maths", "teacher": "Mr. Gupta", "periods": 5, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "Science", "teacher": "Mrs. Patel", "periods": 4, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "Social", "teacher": "Mr. Khan", "periods": 4, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "Hindi", "teacher": "Mrs. Joshi", "periods": 4, "consecutive": "No", "parallel": true, "parallel_subject": "Urdu", "parallel_teacher": "Mr. Siddiqui", "periods_pref": [], "days_pref": []},
+        {"name": "Urdu", "teacher": "Mr. Siddiqui", "periods": 4, "consecutive": "No", "parallel": true, "parallel_subject": "Hindi", "parallel_teacher": "Mrs. Joshi", "periods_pref": [], "days_pref": []},
+        {"name": "Drawing", "teacher": "Mrs. Verma", "periods": 2, "consecutive": "Yes", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "PT", "teacher": "Mr. Rathore", "periods": 2, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [8], "days_pref": []}
+      ]
+    },
+    "6B": {
+      "teacher": "Mr. Gupta",
+      "teacher_period": 1,
+      "subjects": [
+        {"name": "English", "teacher": "Mrs. Kapoor", "periods": 5, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "Maths", "teacher": "Mr. Gupta", "periods": 5, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "Science", "teacher": "Mr. Mehta", "periods": 4, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "Social", "teacher": "Mr. Khan", "periods": 4, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "Hindi", "teacher": "Mrs. Joshi", "periods": 4, "consecutive": "No", "parallel": true, "parallel_subject": "Urdu", "parallel_teacher": "Mr. Siddiqui", "periods_pref": [], "days_pref": []},
+        {"name": "Urdu", "teacher": "Mr. Siddiqui", "periods": 4, "consecutive": "No", "parallel": true, "parallel_subject": "Hindi", "parallel_teacher": "Mrs. Joshi", "periods_pref": [], "days_pref": []},
+        {"name": "Drawing", "teacher": "Mrs. Verma", "periods": 2, "consecutive": "Yes", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "PT", "teacher": "Mr. Rathore", "periods": 2, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [8], "days_pref": []}
+      ]
+    },
+    "7A": {
+      "teacher": "Mrs. Patel",
+      "teacher_period": 2,
+      "subjects": [
+        {"name": "English", "teacher": "Mrs. Sharma", "periods": 5, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "Maths", "teacher": "Mr. Agarwal", "periods": 5, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "Science", "teacher": "Mrs. Patel", "periods": 4, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "Social", "teacher": "Mr. Khan", "periods": 3, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "Hindi", "teacher": "Mrs. Joshi", "periods": 3, "consecutive": "No", "parallel": true, "parallel_subject": "Urdu", "parallel_teacher": "Mr. Siddiqui", "periods_pref": [], "days_pref": []},
+        {"name": "Urdu", "teacher": "Mr. Siddiqui", "periods": 3, "consecutive": "No", "parallel": true, "parallel_subject": "Hindi", "parallel_teacher": "Mrs. Joshi", "periods_pref": [], "days_pref": []},
+        {"name": "Computer", "teacher": "Ms. Reddy", "periods": 2, "consecutive": "Yes", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "PT", "teacher": "Mr. Rathore", "periods": 2, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [8], "days_pref": []},
+        {"name": "Library", "teacher": "Mrs. Verma", "periods": 1, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []}
+      ]
+    },
+    "7B": {
+      "teacher": "Mr. Khan",
+      "teacher_period": 2,
+      "subjects": [
+        {"name": "English", "teacher": "Mrs. Kapoor", "periods": 5, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "Maths", "teacher": "Mr. Agarwal", "periods": 5, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "Science", "teacher": "Mr. Mehta", "periods": 4, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "Social", "teacher": "Mr. Khan", "periods": 3, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "Hindi", "teacher": "Mrs. Joshi", "periods": 3, "consecutive": "No", "parallel": true, "parallel_subject": "Urdu", "parallel_teacher": "Mr. Siddiqui", "periods_pref": [], "days_pref": []},
+        {"name": "Urdu", "teacher": "Mr. Siddiqui", "periods": 3, "consecutive": "No", "parallel": true, "parallel_subject": "Hindi", "parallel_teacher": "Mrs. Joshi", "periods_pref": [], "days_pref": []},
+        {"name": "Computer", "teacher": "Ms. Reddy", "periods": 2, "consecutive": "Yes", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "PT", "teacher": "Mr. Rathore", "periods": 2, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [8], "days_pref": []},
+        {"name": "Library", "teacher": "Mrs. Verma", "periods": 1, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []}
+      ]
+    },
+    "8A": {
+      "teacher": "Mr. Agarwal",
+      "teacher_period": 3,
+      "subjects": [
+        {"name": "English", "teacher": "Mrs. Sharma", "periods": 5, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "Maths", "teacher": "Mr. Agarwal", "periods": 6, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "Science", "teacher": "Mrs. Patel", "periods": 5, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "Social", "teacher": "Mr. Khan", "periods": 3, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "Hindi", "teacher": "Mrs. Joshi", "periods": 4, "consecutive": "No", "parallel": true, "parallel_subject": "Urdu", "parallel_teacher": "Mr. Siddiqui", "periods_pref": [], "days_pref": []},
+        {"name": "Urdu", "teacher": "Mr. Siddiqui", "periods": 4, "consecutive": "No", "parallel": true, "parallel_subject": "Hindi", "parallel_teacher": "Mrs. Joshi", "periods_pref": [], "days_pref": []},
+        {"name": "PT", "teacher": "Mr. Rathore", "periods": 2, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [8], "days_pref": []},
+        {"name": "Computer", "teacher": "Ms. Reddy", "periods": 2, "consecutive": "Yes", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "Library", "teacher": "Mrs. Verma", "periods": 1, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []}
+      ]
+    },
+    "8B": {
+      "teacher": "Mrs. Kapoor",
+      "teacher_period": 3,
+      "subjects": [
+        {"name": "English", "teacher": "Mrs. Kapoor", "periods": 5, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "Maths", "teacher": "Mr. Gupta", "periods": 6, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "Science", "teacher": "Mr. Mehta", "periods": 5, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "Social", "teacher": "Mr. Khan", "periods": 3, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "Hindi", "teacher": "Mrs. Joshi", "periods": 4, "consecutive": "No", "parallel": true, "parallel_subject": "Urdu", "parallel_teacher": "Mr. Siddiqui", "periods_pref": [], "days_pref": []},
+        {"name": "Urdu", "teacher": "Mr. Siddiqui", "periods": 4, "consecutive": "No", "parallel": true, "parallel_subject": "Hindi", "parallel_teacher": "Mrs. Joshi", "periods_pref": [], "days_pref": []},
+        {"name": "PT", "teacher": "Mr. Rathore", "periods": 2, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [8], "days_pref": []},
+        {"name": "Computer", "teacher": "Ms. Reddy", "periods": 2, "consecutive": "Yes", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "Library", "teacher": "Mrs. Verma", "periods": 1, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []}
+      ]
+    },
+    "9A": {
+      "teacher": "Mrs. Joshi",
+      "teacher_period": 1,
+      "subjects": [
+        {"name": "English", "teacher": "Mrs. Sharma", "periods": 5, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "Maths", "teacher": "Mr. Agarwal", "periods": 6, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "Science", "teacher": "Mrs. Patel", "periods": 5, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "Social", "teacher": "Mr. Khan", "periods": 4, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "Hindi", "teacher": "Mrs. Joshi", "periods": 5, "consecutive": "No", "parallel": true, "parallel_subject": "Urdu", "parallel_teacher": "Mr. Siddiqui", "periods_pref": [], "days_pref": []},
+        {"name": "Urdu", "teacher": "Mr. Siddiqui", "periods": 5, "consecutive": "No", "parallel": true, "parallel_subject": "Hindi", "parallel_teacher": "Mrs. Joshi", "periods_pref": [], "days_pref": []},
+        {"name": "PT", "teacher": "Mr. Rathore", "periods": 2, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [8], "days_pref": []},
+        {"name": "Computer", "teacher": "Ms. Reddy", "periods": 2, "consecutive": "Yes", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "Library", "teacher": "Mrs. Verma", "periods": 1, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []}
+      ]
+    },
+    "10A": {
+      "teacher": "Mr. Mehta",
+      "teacher_period": 2,
+      "subjects": [
+        {"name": "English", "teacher": "Mrs. Kapoor", "periods": 5, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "Maths", "teacher": "Mr. Gupta", "periods": 6, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "Science", "teacher": "Mr. Mehta", "periods": 6, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "Social", "teacher": "Mr. Khan", "periods": 4, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []},
+        {"name": "Hindi", "teacher": "Mrs. Joshi", "periods": 5, "consecutive": "No", "parallel": true, "parallel_subject": "Urdu", "parallel_teacher": "Mr. Siddiqui", "periods_pref": [], "days_pref": []},
+        {"name": "Urdu", "teacher": "Mr. Siddiqui", "periods": 5, "consecutive": "No", "parallel": true, "parallel_subject": "Hindi", "parallel_teacher": "Mrs. Joshi", "periods_pref": [], "days_pref": []},
+        {"name": "PT", "teacher": "Mr. Rathore", "periods": 2, "consecutive": "No", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [8], "days_pref": []},
+        {"name": "Computer", "teacher": "Ms. Reddy", "periods": 2, "consecutive": "Yes", "parallel": false, "parallel_subject": "", "parallel_teacher": "", "periods_pref": [], "days_pref": []}
+      ]
+    }
+  },
+  "step3": {
+    "Mrs. Joshi": {
+      "combines": [],
+      "unavailability": {"days": ["Fri"], "periods": [7, 8]}
+    },
+    "Mr. Siddiqui": {
+      "combines": [],
+      "unavailability": {}
+    },
+    "Mr. Rathore": {
+      "combines": [],
+      "unavailability": {"days": ["Mon"], "periods": [1]}
+    },
+    "Ms. Reddy": {
+      "combines": [],
+      "unavailability": {}
+    },
+    "Mr. Gupta": {
+      "combines": [],
+      "unavailability": {}
+    },
+    "Mrs. Sharma": {
+      "combines": [],
+      "unavailability": {}
+    }
+  }
+}
