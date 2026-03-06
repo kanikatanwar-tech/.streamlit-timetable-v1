@@ -679,6 +679,14 @@ def _class_config_tab(cn, teachers, ppd, wdays, required, day_names):
 
 
 def _step2_validate_and_continue():
+    """Run all validation checks matching the original tkinter implementation.
+
+    Section ①  Period counts per class.
+    Section ②  Teacher-level hard conflicts (same teacher double-booked across classes).
+    Section ③  Within-class slot conflicts (two subjects by *different* teachers
+               pinned to overlapping period slots in the same class on the same day).
+    """
+    import math
     log.info("_step2_validate_and_continue: running")
     cfg       = eng.configuration
     ppd       = cfg["periods_per_day"]
@@ -686,81 +694,330 @@ def _step2_validate_and_continue():
     required  = ppd * wdays
     all_cn    = _all_classes()
     day_names = DAY_NAMES[:wdays]
-    errors, ok_list, hc, teacher_slots = [], [], [], {}
 
-    def _add(t, desc):
-        if t: teacher_slots.setdefault(t,[]).append(desc)
+    # ── Section ①: Period counts ─────────────────────────────────────────────
+    period_errors = []   # (cn, msg)
+    period_ok     = []   # (cn, msg)
+    teacher_slots = {}   # teacher -> [slot_descriptor]
+
+    def _add(teacher, desc):
+        if teacher:
+            teacher_slots.setdefault(teacher, []).append(desc)
 
     for cn in all_cn:
-        cd    = eng.class_config_data.get(cn,{})
-        subjs = cd.get("subjects",[])
+        cd    = eng.class_config_data.get(cn, {})
+        subjs = cd.get("subjects", [])
         if not subjs:
-            errors.append((cn,"NO SUBJECTS added"))
-            log.warning("_step2_validate: %s no subjects", cn); continue
-        total = sum(s.get("periods",0) for s in subjs)
+            period_errors.append((cn, "NO SUBJECTS added"))
+            log.warning("_step2_validate: %s no subjects", cn)
+            continue
+
+        total = sum(s.get("periods", 0) for s in subjs)
         diff  = total - required
+        sign  = "+" if diff > 0 else ""
         if total == required:
-            ok_list.append((cn, f"{total}/{required} ({len(subjs)} subjects)"))
+            period_ok.append((cn, f"{total}/{required} periods  ({len(subjs)} subjects)"))
         else:
-            errors.append((cn, f"Mismatch: {total} assigned, need {required} "
-                               f"({'+'if diff>0 else ''}{diff})"))
+            period_errors.append((cn,
+                f"Period mismatch: {total} assigned, need {required}  ({sign}{diff})"))
             log.warning("_step2_validate: %s %d≠%d", cn, total, required)
 
-        ct = cd.get("teacher","").strip()
-        ct_per = cd.get("teacher_period",1)
+        ct     = cd.get("teacher", "").strip()
+        ct_per = cd.get("teacher_period", 1)
         if ct:
-            _add(ct, {"class":cn,"is_ct":True,"fixed_period":ct_per,
-                      "day_set":set(day_names),"period_prefs":[ct_per]})
+            _add(ct, {
+                "class":        cn,
+                "label":        f"Class Teacher of {cn} (Period {ct_per}, every day)",
+                "fixed_period": ct_per,
+                "period_prefs": [ct_per],
+                "day_set":      set(day_names),
+                "is_class_teacher": True,
+                "subj_name":    "",
+            })
+
         for s in subjs:
-            t = s.get("teacher","").strip()
+            t = s.get("teacher", "").strip()
             if t:
-                _add(t, {"class":cn,"is_ct":False,"fixed_period":None,
-                         "day_set":set(s.get("days_pref",[]) or day_names),
-                         "period_prefs":list(s.get("periods_pref",[])),
-                         "subj_name":s["name"]})
-            if s.get("parallel") and s.get("parallel_teacher"):
-                _add(s["parallel_teacher"].strip(),
-                     {"class":cn,"is_ct":False,"fixed_period":None,
-                      "day_set":set(s.get("days_pref",[]) or day_names),
-                      "period_prefs":list(s.get("periods_pref",[]))})
+                _add(t, {
+                    "class":        cn,
+                    "label":        f"Subject '{s['name']}' in {cn}  (×{s['periods']} periods/wk)",
+                    "fixed_period": None,
+                    "period_prefs": list(s.get("periods_pref", [])),
+                    "day_set":      set(s.get("days_pref", []) or day_names),
+                    "is_class_teacher": False,
+                    "subj_name":    s["name"],
+                    "consecutive":  s.get("consecutive") == "Yes",
+                })
+            pt = s.get("parallel_teacher", "").strip() if s.get("parallel") else ""
+            if pt:
+                _add(pt, {
+                    "class":        cn,
+                    "label":        f"Parallel teacher for '{s.get('parallel_subject','')}' in {cn}",
+                    "fixed_period": None,
+                    "period_prefs": list(s.get("periods_pref", [])),
+                    "day_set":      set(s.get("days_pref", []) or day_names),
+                    "is_class_teacher": False,
+                    "subj_name":    s.get("parallel_subject", ""),
+                })
+
+    # ── Section ②: Teacher-level hard conflicts (across classes) ────────────
+    hard_conflicts = []
+
+    def _period_overlap(prefs_a, prefs_b):
+        if not prefs_a or not prefs_b:
+            return None
+        s = set(prefs_a) & set(prefs_b)
+        return s if s else None
 
     for teacher, slots in teacher_slots.items():
-        for i in range(len(slots)):
-            for j in range(i+1, len(slots)):
+        n = len(slots)
+        for i in range(n):
+            for j in range(i + 1, n):
                 a, b = slots[i], slots[j]
-                if a["class"]==b["class"]: continue
-                if not (a["day_set"] & b["day_set"]): continue
-                if a["is_ct"] and b["period_prefs"] and a["fixed_period"] in b["period_prefs"]:
-                    hc.append({"teacher":teacher,
-                               "reason":(f"CT period {a['fixed_period']} in {a['class']} "
-                                         f"conflicts with pref for '{b.get('subj_name','')}' "
-                                         f"in {b['class']}")})
-                    log.warning("_step2_validate: hard conflict %s: %s",
-                                teacher, hc[-1]["reason"])
+                if a["class"] == b["class"]:
+                    continue
+                days = a["day_set"] & b["day_set"]
+                if not days:
+                    continue
+                # CT fixed period vs subject period pref
+                if a["is_class_teacher"] and b["period_prefs"]:
+                    if a["fixed_period"] in b["period_prefs"]:
+                        hard_conflicts.append({
+                            "teacher": teacher, "slot_a": a["label"], "slot_b": b["label"],
+                            "reason": (
+                                f"Period {a['fixed_period']} is fixed every day for "
+                                f"class-teacher duty in {a['class']}, but also listed as "
+                                f"preferred period for '{b.get('subj_name','')}' in "
+                                f"{b['class']} on days: {', '.join(sorted(days))}")
+                        })
+                        continue
+                if b["is_class_teacher"] and a["period_prefs"]:
+                    if b["fixed_period"] in a["period_prefs"]:
+                        hard_conflicts.append({
+                            "teacher": teacher, "slot_a": b["label"], "slot_b": a["label"],
+                            "reason": (
+                                f"Period {b['fixed_period']} is fixed every day for "
+                                f"class-teacher duty in {b['class']}, but also listed as "
+                                f"preferred period for '{a.get('subj_name','')}' in "
+                                f"{a['class']} on days: {', '.join(sorted(days))}")
+                        })
+                        continue
+                if a["is_class_teacher"] and b["is_class_teacher"]:
+                    hard_conflicts.append({
+                        "teacher": teacher, "slot_a": a["label"], "slot_b": b["label"],
+                        "reason": (
+                            f"Cannot be Class Teacher of two classes simultaneously. "
+                            f"Fixed Period {a['fixed_period']} (all days) for {a['class']} "
+                            f"AND Period {b['fixed_period']} (all days) for {b['class']}.")
+                    })
+                    continue
+                pov = _period_overlap(a["period_prefs"], b["period_prefs"])
+                if pov is not None:
+                    hard_conflicts.append({
+                        "teacher": teacher, "slot_a": a["label"], "slot_b": b["label"],
+                        "reason": (
+                            f"Both require Period(s) {sorted(pov)} on "
+                            f"{', '.join(sorted(days))} — teacher cannot be in "
+                            f"{a['class']} and {b['class']} simultaneously.")
+                    })
 
-    vr = {"ok": not errors and not hc,
-          "period_errors": errors, "period_ok": ok_list, "hard_conflicts": hc}
+    log.info("_step2_validate: hard_conflicts=%d", len(hard_conflicts))
+
+    # ── Section ③: Within-class slot conflicts ────────────────────────────
+    within_class_conflicts = []
+
+    for cn in all_cn:
+        cd     = eng.class_config_data.get(cn, {})
+        subjs  = cd.get("subjects", [])
+
+        items = []
+        for s in subjs:
+            if not s.get("periods_pref"):
+                continue
+            period_set = set(s["periods_pref"])
+            day_set    = set(s.get("days_pref", []) or day_names)
+            n_periods  = s["periods"]
+            n_days     = len(day_set)
+            need_per_day = math.ceil(n_periods / n_days) if n_days > 0 else 1
+            items.append({
+                "label":        "Subject '{}' (Period(s) {}, day(s) {}, teacher: {})".format(
+                                    s["name"],
+                                    sorted(period_set),
+                                    sorted(day_set) if s.get("days_pref") else "any",
+                                    s.get("teacher", "").strip()),
+                "period_set":   period_set,
+                "day_set":      day_set,
+                "need_per_day": need_per_day,
+                "teacher":      s.get("teacher", "").strip(),
+            })
+
+        if len(items) < 2:
+            continue
+
+        for day in day_names:
+            active = [it for it in items if day in it["day_set"]]
+            if len(active) < 2:
+                continue
+
+            # Pairwise check — only flag DIFFERENT-teacher pairs
+            for i in range(len(active)):
+                for j in range(i + 1, len(active)):
+                    a, b = active[i], active[j]
+                    if a["teacher"] == b["teacher"]:
+                        continue
+                    combined_slots = a["period_set"] | b["period_set"]
+                    combined_need  = a["need_per_day"] + b["need_per_day"]
+                    if combined_need > len(combined_slots):
+                        contested = a["period_set"] & b["period_set"]
+                        within_class_conflicts.append({
+                            "class": cn, "day": day,
+                            "item_a": a["label"], "item_b": b["label"],
+                            "reason": (
+                                f"On {day}, two subjects by DIFFERENT teachers both need "
+                                f"Period(s) {sorted(contested) if contested else sorted(combined_slots)} "
+                                f"in class {cn} — combined demand "
+                                f"({a['need_per_day']} + {b['need_per_day']} = {combined_need}) "
+                                f"exceeds available slots {sorted(combined_slots)} — "
+                                f"the class grid cannot fit both.")
+                        })
+
+            # Whole-group check: any period claimed by > 1 teacher
+            all_pref_periods = set()
+            for it in active:
+                all_pref_periods |= it["period_set"]
+            for p in all_pref_periods:
+                teachers_needing_p = {it["teacher"] for it in active if p in it["period_set"]}
+                if len(teachers_needing_p) > 1:
+                    already = any(c["class"] == cn and c["day"] == day
+                                  for c in within_class_conflicts)
+                    if not already:
+                        within_class_conflicts.append({
+                            "class": cn, "day": day,
+                            "item_a": f"{len(teachers_needing_p)} subjects from different teachers",
+                            "item_b": "",
+                            "reason": (
+                                f"On {day}, Period {p} in class {cn} is claimed by "
+                                f"{len(teachers_needing_p)} different teachers "
+                                f"({', '.join(sorted(teachers_needing_p))}) — "
+                                f"only one teacher can occupy a period slot.")
+                        })
+
+    log.info("_step2_validate: errors=%d hc=%d wcc=%d",
+             len(period_errors), len(hard_conflicts), len(within_class_conflicts))
+
+    vr = {
+        "ok":                    not period_errors and not hard_conflicts and not within_class_conflicts,
+        "period_errors":         period_errors,
+        "period_ok":             period_ok,
+        "hard_conflicts":        hard_conflicts,
+        "within_class_conflicts": within_class_conflicts,
+        "required":              required,
+        "wdays":                 wdays,
+        "ppd":                   ppd,
+    }
     st.session_state["s2_validation_result"] = vr
-    log.info("_step2_validate: errors=%d hc=%d ok=%s", len(errors), len(hc), vr["ok"])
 
     if vr["ok"]:
-        _notify("✅ Validation passed.", "success")
+        _notify("✅ All validation checks passed — proceeding to Step 3.", "success")
         _nav("step3")
     else:
-        _notify(f"❌ {len(errors)} period error(s), {len(hc)} conflict(s) — see below.", "error")
+        total_err = len(period_errors) + len(hard_conflicts) + len(within_class_conflicts)
+        _notify(
+            f"❌ {total_err} error(s) found — fix all issues below, then validate again.",
+            "error")
         st.rerun()
 
 
 def _display_s2_validation(vr):
-    if vr.get("period_errors"):
-        with st.expander(f"❌ {len(vr['period_errors'])} Period Error(s)", expanded=True):
-            for cn, msg in vr["period_errors"]: st.error(f"**{cn}**: {msg}")
-    if vr.get("hard_conflicts"):
-        with st.expander(f"⚠ {len(vr['hard_conflicts'])} Conflict(s)", expanded=True):
-            for c in vr["hard_conflicts"]: st.warning(f"**{c['teacher']}**: {c['reason']}")
-    if vr.get("period_ok"):
-        with st.expander(f"✓ {len(vr['period_ok'])} Class(es) OK", expanded=False):
-            for cn, msg in vr["period_ok"]: st.success(f"**{cn}**: {msg}")
+    """Render the full 3-section validation report matching the original."""
+    period_errors  = vr.get("period_errors", [])
+    period_ok      = vr.get("period_ok", [])
+    hard_conflicts = vr.get("hard_conflicts", [])
+    wcc            = vr.get("within_class_conflicts", [])
+    required       = vr.get("required", "?")
+    wdays          = vr.get("wdays", "?")
+    ppd            = vr.get("ppd", "?")
+    any_error      = bool(period_errors or hard_conflicts or wcc)
+
+    # Quick-count summary bar
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        if period_errors:
+            st.error(f"**{len(period_errors)}**\nPeriod Errors")
+        else:
+            st.success(f"**0**\nPeriod Errors")
+    with c2:
+        if hard_conflicts:
+            st.error(f"**{len(hard_conflicts)}**\nTeacher Conflicts")
+        else:
+            st.success(f"**0**\nTeacher Conflicts")
+    with c3:
+        if wcc:
+            st.error(f"**{len(wcc)}**\nWithin-Class Conflicts")
+        else:
+            st.success(f"**0**\nWithin-Class Conflicts")
+    with c4:
+        st.success(f"**{len(period_ok)}**\nClasses OK")
+
+    st.divider()
+
+    # ── Section ①: Period Counts ─────────────────────────────────────────────
+    s1_label = (f"① PERIOD COUNT — {len(period_ok)} OK / {len(period_errors)} ERRORS")
+    with st.expander(s1_label, expanded=bool(period_errors)):
+        st.caption(f"Required per class: **{required}** periods/week  "
+                   f"({wdays} days × {ppd} periods)")
+        if period_errors:
+            st.markdown("**❌ Fix these classes:**")
+            for cn, msg in sorted(period_errors):
+                st.error(f"**{cn}** — {msg}")
+        if period_ok:
+            st.markdown("**✓ Classes with correct period count:**")
+            cols = st.columns(3)
+            for idx, (cn, msg) in enumerate(sorted(period_ok)):
+                with cols[idx % 3]:
+                    st.success(f"**{cn}**: {msg}")
+
+    # ── Section ②: Teacher Conflicts (across classes) ────────────────────────
+    s2_label = f"② TEACHER CONFLICTS (across classes) — {len(hard_conflicts)} found"
+    with st.expander(s2_label, expanded=bool(hard_conflicts)):
+        if not hard_conflicts:
+            st.success("✓ No teacher-level hard conflicts detected.")
+        else:
+            st.error("DEFINITE impossibilities — a teacher cannot be in two classes at the same time.")
+            for i, c in enumerate(hard_conflicts, 1):
+                with st.container(border=True):
+                    st.markdown(f"**[{i}] Teacher: {c['teacher']}**")
+                    st.caption(f"Assignment A: {c['slot_a']}")
+                    st.caption(f"Assignment B: {c['slot_b']}")
+                    st.warning(f"⚠ {c['reason']}")
+                    st.info("💡 **FIX:** Change the period/day preference for one of the two assignments.")
+
+    # ── Section ③: Within-Class Slot Conflicts ───────────────────────────────
+    s3_label = f"③ WITHIN-CLASS SLOT CONFLICTS — {len(wcc)} found"
+    with st.expander(s3_label, expanded=bool(wcc)):
+        if not wcc:
+            st.success("✓ No within-class slot conflicts detected.")
+        else:
+            st.error("DEFINITE impossibilities — two or more subjects in the same class are pinned "
+                     "to the same period slot(s) on the same day, leaving no valid placement.")
+            for i, c in enumerate(wcc, 1):
+                with st.container(border=True):
+                    st.markdown(f"**[{i}] Class: {c['class']}  —  Day: {c['day']}**")
+                    st.caption(f"Item A: {c['item_a']}")
+                    if c.get("item_b"):
+                        st.caption(f"Item B: {c['item_b']}")
+                    st.warning(f"⚠ {c['reason']}")
+                    st.info("💡 **FIX:** Adjust the period preference or day preference "
+                            "so subjects do not compete for the same slot.")
+
+    # ── Result footer ────────────────────────────────────────────────────────
+    st.divider()
+    if any_error:
+        total_err = len(period_errors) + len(hard_conflicts) + len(wcc)
+        st.error(f"**RESULT:** {total_err} error(s) found. Fix all errors above then "
+                 f"click **✓ Validate & Complete** again.")
+    else:
+        st.success("**RESULT:** All checks passed. Click **✓ Validate & Complete** to proceed to Step 3.")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -781,6 +1038,13 @@ def page_step3():
 
     if not hasattr(eng,"step3_data"):           eng.step3_data = {}
     if not hasattr(eng,"step3_unavailability"): eng.step3_unavailability = {}
+
+    # Always keep workload attributes fresh so validate/workload tab are consistent.
+    # This mirrors _build_step3_ui() calling _compute_teacher_workload() on every render.
+    try:
+        eng.prepare_step3_workload()
+    except Exception as ex:
+        log.warning("page_step3: prepare_step3_workload failed: %s", ex)
 
     with st.expander("💾 Save / Load Step 3 Config", expanded=False):
         c1,c2 = st.columns(2)
@@ -814,7 +1078,7 @@ def page_step3():
         if st.button("🔍 Validate Step 3"):
             log.info("page_step3: validate")
             try:
-                eng._compute_teacher_workload()
+                eng.prepare_step3_workload()
                 vr = eng.validate_step3()
                 st.session_state["s3_validation_result"] = vr
                 log.info("page_step3: validate result can_proceed=%s issues=%d",
@@ -829,7 +1093,7 @@ def page_step3():
         if st.button("➤ Proceed to Step 4 →", type="primary"):
             log.info("page_step3: proceed to step4")
             try:
-                eng._compute_teacher_workload()
+                eng.prepare_step3_workload()
                 vr = eng.validate_step3()
                 if vr["can_proceed"]:
                     _nav("step4")
@@ -877,78 +1141,317 @@ def _load_step3_config(raw: bytes):
 
 
 def _render_workload(teachers, wdays, ppd):
+    """Render teacher workload with Edit/Combine and Skip buttons per teacher.
+
+    Mirrors the original Step 3 left-panel exactly:
+      • Overloaded teachers listed first (red cards)
+      • All teachers have Edit/Combine button — not just overloaded ones
+      • Clicking Edit/Combine opens the full assignment+combine detail panel below
+    """
     log.debug("_render_workload: %d teachers", len(teachers))
-    max_all = wdays * ppd
-    all_cn  = _all_classes()
-    for teacher in teachers:
-        total, details = 0, []
-        for cn in all_cn:
-            cd = eng.class_config_data.get(cn,{})
-            for s in cd.get("subjects",[]):
-                if (s.get("teacher","").strip()==teacher or
-                        s.get("parallel_teacher","").strip()==teacher):
-                    total += s.get("periods",0)
-                    details.append(f"{cn}: {s['name']} ×{s['periods']}")
-        s3d  = eng.step3_data.get(teacher,{})
-        skip = s3d.get("skipped",False)
-        over = total > max_all
-        icon = "🔴" if (over and not skip) else "✅"
-        with st.expander(f"{icon} **{teacher}** — {total} periods"+(f" (SKIP)" if skip else ""),
-                         expanded=False):
-            if over and not skip:
-                st.warning(f"Overloaded by {total-max_all} (max {max_all})")
-            for d in details: st.write(f"  • {d}")
-            new_skip = st.checkbox("Skip / Accept overload", value=skip, key=f"skip_{teacher}")
-            if new_skip != skip:
-                log.info("_render_workload: %s skip→%s", teacher, new_skip)
-                eng.step3_data.setdefault(teacher,{})["skipped"] = new_skip
-                st.rerun()
+
+    max_allowed = (ppd - 2) * wdays
+    wl          = getattr(eng, "_step3_teacher_wl", {})
+
+    if not wl:
+        n_cls = sum(1 for cn in eng.class_config_data
+                    if eng.class_config_data[cn].get('subjects'))
+        st.warning(
+            f"No teacher assignments found. Classes with subjects: {n_cls}. "
+            "Make sure teachers are assigned to subjects in Step 2.")
+        return
+
+    st.caption(
+        f"Overload threshold: **{max_allowed}** periods/week  "
+        f"({wdays} days × ({ppd}−2) periods).  "
+        f"All teachers shown — overloaded ones highlighted in red.")
+
+    overloaded_teachers = sorted(t for t in wl if t in eng._step3_overloaded)
+    normal_teachers     = sorted(t for t in wl if t not in eng._step3_overloaded)
+
+    sel_teacher = st.session_state.get("s3_selected_teacher", "")
+
+    def _teacher_card(teacher):
+        info      = wl.get(teacher, {"total": 0, "entries": []})
+        effective = eng._effective_total(teacher)
+        s3d       = eng.step3_data.get(teacher, {})
+        skipped   = s3d.get("skipped", False)
+        n_comb    = len(s3d.get("combines", []))
+        is_over   = teacher in eng._step3_overloaded
+        still_over = is_over and effective > max_allowed
+
+        # Card colour
+        if teacher == sel_teacher:
+            border_style = "border:2px solid #2980b9; padding:8px; border-radius:6px; background:#eaf4fb"
+        elif skipped:
+            border_style = "border:1px solid #ccc; padding:8px; border-radius:6px; background:#e8f5e9"
+        elif still_over:
+            border_style = "border:1px solid #e74c3c; padding:8px; border-radius:6px; background:#fdecea"
+        elif is_over and effective <= max_allowed:
+            border_style = "border:1px solid #f39c12; padding:8px; border-radius:6px; background:#fff8e1"
+        else:
+            border_style = "border:1px solid #ccc; padding:8px; border-radius:6px; background:#fff"
+
+        # Badge
+        if skipped:
+            badge = "SKIPPED"
+        elif still_over:
+            badge = "OVERLOADED"
+        elif n_comb and not still_over:
+            badge = f"{n_comb} combine{'s' if n_comb>1 else ''}"
+        else:
+            badge = "OK"
+
+        stat = f"Assigned: **{info['total']}**"
+        if effective != info["total"]:
+            stat += f"  →  Effective: **{effective}**"
+        stat += f"  /  Max: **{max_allowed}**"
+
+        with st.container():
+            st.markdown(f"<div style='{border_style}'>", unsafe_allow_html=True)
+            h1, h2 = st.columns([3, 1])
+            with h1:
+                st.markdown(f"**{teacher}**")
+                st.caption(stat)
+            with h2:
+                badge_color = "#c0392b" if still_over else ("#27ae60" if not is_over or skipped else "#f39c12")
+                st.markdown(
+                    f"<span style='color:{badge_color};font-weight:bold;font-size:0.8rem'>{badge}</span>",
+                    unsafe_allow_html=True)
+
+            b1, b2 = st.columns(2)
+            with b1:
+                btn_label = "✏ Close Detail" if teacher == sel_teacher else "✏ Edit / Combine"
+                if st.button(btn_label, key=f"ec_{teacher}", use_container_width=True):
+                    if teacher == sel_teacher:
+                        st.session_state.pop("s3_selected_teacher", None)
+                    else:
+                        st.session_state["s3_selected_teacher"] = teacher
+                        # Clear any stale checkboxes for this teacher
+                        for k in list(st.session_state.keys()):
+                            if k.startswith(f"s3cb_{teacher}_"):
+                                del st.session_state[k]
+                    st.rerun()
+            with b2:
+                skip_lbl = "↩ Un-skip" if skipped else "⏭ Skip"
+                if st.button(skip_lbl, key=f"sk_{teacher}", use_container_width=True):
+                    eng.step3_data.setdefault(teacher, {"skipped": False, "combines": []})
+                    eng.step3_data[teacher]["skipped"] = not skipped
+                    eng.prepare_step3_workload()
+                    st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
+
+    if overloaded_teachers:
+        st.markdown(f"#### ⚠ Overloaded  (>{max_allowed}/wk)")
+        for t in overloaded_teachers:
+            _teacher_card(t)
+
+    if normal_teachers:
+        st.markdown(f"#### ✓ Within limit  (≤{max_allowed}/wk)")
+        for t in normal_teachers:
+            _teacher_card(t)
+
+    # ── Detail panel for selected teacher ─────────────────────────────────────
+    if sel_teacher and sel_teacher in wl:
+        st.divider()
+        _render_teacher_combine_detail(sel_teacher)
+
+
+def _render_teacher_combine_detail(teacher):
+    """Full assignment + combine panel for a selected teacher.
+
+    Mirrors the original right panel:
+      • Header (red if overloaded, green if OK) with Assigned / Effective / Max
+      • Left side: checkboxes per assignment with CT info + parallel-CT warnings
+      • Right side: '✓ Combine Checked Entries' button + list of existing combines
+    """
+    wl        = getattr(eng, "_step3_teacher_wl", {})
+    info      = wl.get(teacher, {"total": 0, "entries": []})
+    entries   = info["entries"]
+    s3d       = eng.step3_data.setdefault(teacher, {"skipped": False, "combines": []})
+    max_all   = getattr(eng, "_step3_max_allowed", 9999)
+    effective = eng._effective_total(teacher)
+    is_over   = teacher in getattr(eng, "_step3_overloaded", set())
+    still_over = is_over and effective > max_all
+
+    # ── Header strip ──────────────────────────────────────────────────────────
+    hdr_color = "#c0392b" if still_over else "#1a7a1a"
+    st.markdown(
+        f"<div style='background:{hdr_color};color:white;padding:10px 16px;"
+        f"border-radius:6px;display:flex;justify-content:space-between;align-items:center'>"
+        f"<span style='font-size:1.1rem;font-weight:bold'>{teacher}</span>"
+        f"<span style='font-size:0.95rem;font-weight:bold'>"
+        f"Assigned: {info['total']}  |  Effective: {effective}  |  Max: {max_all}"
+        f"</span></div>",
+        unsafe_allow_html=True)
+    st.write("")
+
+    # Track which entry indices are already in a combine
+    combined_indices = set()
+    for cb in s3d["combines"]:
+        for idx in cb.get("entry_indices", []):
+            combined_indices.add(idx)
+
+    left_col, right_col = st.columns([1, 1])
+
+    # ── LEFT: Assignment checkboxes ───────────────────────────────────────────
+    with left_col:
+        st.markdown("**Assignments — check entries to combine**")
+        if not entries:
+            st.info("No assignments found for this teacher.")
+        for ei, entry in enumerate(entries):
+            in_cb = ei in combined_indices
+            ct_info = eng.get_class_ct_info(entry["class"], teacher, entry["subject"])
+            ct      = ct_info["ct"]
+            ct_subs = ct_info["ct_subjects"]
+            has_parallel_warn = ct_info["is_parallel_with_ct"]
+
+            with st.container(border=True):
+                cc1, cc2 = st.columns([1, 8])
+                with cc1:
+                    if in_cb:
+                        st.markdown("✅")
+                    else:
+                        st.checkbox(
+                            "", key=f"s3cb_{teacher}_{ei}",
+                            value=st.session_state.get(f"s3cb_{teacher}_{ei}", False))
+                with cc2:
+                    label_color = "#1a7a1a" if in_cb else "#1a1a1a"
+                    st.markdown(
+                        f"<span style='color:{label_color};font-weight:bold'>"
+                        f"[{entry['class']}]  {entry['subject']}  ({entry['periods']} periods)"
+                        f"{'  ✓ in combine' if in_cb else ''}</span>",
+                        unsafe_allow_html=True)
+                    ct_subs_str = ", ".join(ct_subs) if ct_subs else "—"
+                    st.caption(f"CT: {ct or '—'}   |   CT Subjects: {ct_subs_str}")
+                    if has_parallel_warn:
+                        st.markdown(
+                            f"<span style='color:#c0392b;font-style:italic;font-size:0.82rem'>"
+                            f"⚠  '{entry['subject']}' (teacher) ∥ "
+                            f"'{ct_info['parallel_ct_subject']}' (CT) — parallel conflict!"
+                            f"</span>",
+                            unsafe_allow_html=True)
+
+    # ── RIGHT: Combine Checked Entries + existing combines ────────────────────
+    with right_col:
+        st.markdown("**Combines**")
+
+        if st.button("✓ Combine Checked Entries", key=f"do_combine_{teacher}",
+                     type="primary", use_container_width=True):
+            # Collect checked indices
+            idxs = [ei for ei in range(len(entries))
+                    if st.session_state.get(f"s3cb_{teacher}_{ei}", False)
+                    and ei not in combined_indices]
+
+            err = None
+            if len(idxs) < 2:
+                err = "Check at least 2 assignments (that are not already in a combine)."
+            else:
+                periods_list = [entries[i]["periods"] for i in idxs]
+                if len(set(periods_list)) > 1:
+                    err = (f"All entries to combine must have the same period count. "
+                           f"Selected: {periods_list}")
+                else:
+                    # Parallel-CT conflict check
+                    blocked = []
+                    for i in idxs:
+                        e = entries[i]
+                        ct_i = eng.get_class_ct_info(e["class"], teacher, e["subject"])
+                        if ct_i["is_parallel_with_ct"]:
+                            blocked.append(
+                                f"Class {e['class']}: '{e['subject']}' ({teacher}) ∥ "
+                                f"'{ct_i['parallel_ct_subject']}' (CT: {ct_i['ct']})")
+                    if blocked:
+                        err = (
+                            "Cannot combine — parallel-CT conflict detected:\n\n"
+                            + "\n".join(f"  • {b}" for b in blocked)
+                            + "\n\nThe CT has a fixed period each day; combining would "
+                            "force the parallel subject into the same fixed slot.")
+
+            if err:
+                _notify(err, "error")
+            else:
+                s3d["combines"].append({
+                    "entry_indices": idxs,
+                    "periods_each":  entries[idxs[0]]["periods"],
+                    "classes":       [entries[i]["class"]   for i in idxs],
+                    "subjects":      [entries[i]["subject"] for i in idxs],
+                })
+                # Clear checkboxes
+                for ei in range(len(entries)):
+                    st.session_state.pop(f"s3cb_{teacher}_{ei}", None)
+                eng.prepare_step3_workload()
+                log.info("_render_teacher_combine_detail: combine added for %s: %s",
+                         teacher, [entries[i]["class"] for i in idxs])
+                _notify(f"✓ Combine added for {teacher}.", "success")
+            st.rerun()
+
+        st.write("")
+        if not s3d["combines"]:
+            st.info("No combines yet.\nCheck assignments on the left and click Combine.")
+        else:
+            for ci, cb in enumerate(s3d["combines"]):
+                with st.container(border=True):
+                    classes_str = "  +  ".join(cb.get("classes", []))
+                    st.markdown(f"**Combine {ci+1}:  {classes_str}**")
+                    for i, idx in enumerate(cb.get("entry_indices", [])):
+                        if idx < len(entries):
+                            st.caption(f"• {entries[idx]['label']}")
+                        else:
+                            cls = cb["classes"][i] if i < len(cb.get("classes",[])) else "?"
+                            sub = cb["subjects"][i] if i < len(cb.get("subjects",[])) else "?"
+                            st.caption(f"• '{sub}' in {cls}  x{cb.get('periods_each','?')}/wk")
+                    saving = (len(cb.get("entry_indices", [])) - 1) * cb.get("periods_each", 0)
+                    st.caption(f"💡 Saves {saving} periods/week for {teacher}")
+                    if st.button("✕ Remove", key=f"rm_cb_{teacher}_{ci}",
+                                 use_container_width=True):
+                        s3d["combines"].pop(ci)
+                        eng.prepare_step3_workload()
+                        log.info("_render_teacher_combine_detail: removed combine %d for %s",
+                                 ci, teacher)
+                        st.rerun()
 
 
 def _render_combine_tab(teachers, all_cn):
+    """Shows a summary of all existing combines across all teachers.
+
+    The primary combine interface is in the Teacher Workload tab (Edit/Combine button).
+    This tab shows a read-only overview and quick-remove capability.
+    """
     log.debug("_render_combine_tab")
-    st.markdown("**Combine classes** — one teacher, different classes, same period slot.")
-    with st.container(border=True):
-        st.markdown("**Add Combine**")
-        c1,c2 = st.columns(2)
-        with c1: sel_t       = st.selectbox("Teacher", [""]+teachers, key="cb_teacher")
-        with c2: sel_classes = st.multiselect("Classes", all_cn, key="cb_classes")
-
-        sub_map = {}
-        if sel_t and sel_classes:
-            st.markdown("*Select subject per class:*")
-            cols = st.columns(min(len(sel_classes),4))
-            for idx, cn in enumerate(sel_classes):
-                with cols[idx%4]:
-                    opts = [s["name"] for s in eng.class_config_data.get(cn,{}).get("subjects",[])]
-                    sub_map[cn] = st.selectbox(f"{cn}", [""]+opts, key=f"cb_sub_{cn}")
-
-        if st.button("➕ Add Combine", key="cb_add", type="primary"):
-            if not sel_t: _notify("Select teacher.","warning")
-            elif len(sel_classes)<2: _notify("Select ≥ 2 classes.","warning")
-            elif not all(sub_map.get(cn) for cn in sel_classes): _notify("Select subject for each class.","warning")
-            else:
-                eng.step3_data.setdefault(sel_t,{"skipped":False,"combines":[]})
-                eng.step3_data[sel_t]["combines"].append(
-                    {"classes":sel_classes,"subjects":[sub_map[cn] for cn in sel_classes]})
-                log.info("_render_combine_tab: combine added for %s: %s", sel_t, sel_classes)
-                _notify(f"✓ Combine added for {sel_t}.","success"); st.rerun()
-
-    st.markdown("**Existing Combines**")
+    st.info("💡 To **add** combines, go to the **Teacher Workload** tab and click "
+            "**Edit / Combine** next to any teacher.")
+    st.markdown("---")
+    st.markdown("**All Existing Combines**")
     any_cb = False
-    for teacher, s3d in sorted(eng.step3_data.items()):
-        cbs = s3d.get("combines",[])
-        if not cbs: continue
+    for teacher in sorted(eng.step3_data.keys()):
+        s3d = eng.step3_data[teacher]
+        cbs = s3d.get("combines", [])
+        if not cbs:
+            continue
         any_cb = True
+        wl   = getattr(eng, "_step3_teacher_wl", {})
+        info = wl.get(teacher, {"entries": []})
+        entries = info["entries"]
+
         st.markdown(f"**{teacher}**")
         for ci, cb in enumerate(cbs):
-            c1,c2 = st.columns([5,1])
-            with c1: st.write(f"  📌 {' + '.join(cb.get('classes',[]))}  ·  {', '.join(cb.get('subjects',[]))}")
+            c1, c2 = st.columns([5, 1])
+            with c1:
+                classes_str  = " + ".join(cb.get("classes", []))
+                subjects_str = ", ".join(cb.get("subjects", []))
+                saving = (len(cb.get("entry_indices", [])) - 1) * cb.get("periods_each", 0)
+                st.write(f"  📌 **{classes_str}**  ·  {subjects_str}  "
+                         f"  *(saves {saving} periods/wk)*")
             with c2:
-                if st.button("🗑", key=f"del_cb_{teacher}_{ci}"):
+                if st.button("🗑", key=f"del_cbt_{teacher}_{ci}",
+                             help="Remove this combine"):
+                    cbs.pop(ci)
+                    eng.prepare_step3_workload()
                     log.info("_render_combine_tab: del %d for %s", ci, teacher)
-                    cbs.pop(ci); st.rerun()
-    if not any_cb: st.info("No combines defined.")
+                    st.rerun()
+    if not any_cb:
+        st.info("No combines defined yet.")
 
 
 def _render_unavailability_tab(teachers, day_names, ppd):

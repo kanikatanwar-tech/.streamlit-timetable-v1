@@ -228,9 +228,41 @@ class TimetableEngine:
         return total
 
     # ── Left panel: ALL teachers ──────────────────────────────────────────
+    def prepare_step3_workload(self):
+        """Compute workload AND set all step-3 attributes needed by validate_step3.
+
+        Must be called before validate_step3() or _render_workload().
+        Sets:
+          _step3_teacher_wl   – {teacher: {'total': int, 'entries': [...]}}
+          _step3_overloaded   – set of teacher names whose raw total > max_allowed
+          _step3_max_allowed  – (ppd - 2) * wdays  (mirrors original formula)
+          _step3_total_week   – ppd * wdays
+
+        Returns the workload dict (same as _compute_teacher_workload).
+        """
+        cfg          = self.configuration
+        ppd          = cfg['periods_per_day']
+        wdays        = cfg['working_days']
+        total_week   = ppd * wdays
+        max_allowed  = (ppd - 2) * wdays   # must keep ≥ 2 free periods per day
+
+        wl = self._compute_teacher_workload()
+
+        self._step3_teacher_wl  = wl
+        self._step3_total_week  = total_week
+        self._step3_max_allowed = max_allowed
+        self._step3_overloaded  = {
+            t for t, info in wl.items() if info['total'] > max_allowed
+        }
+        return wl
+
     def validate_step3(self):
-        """Return dict with overload status; no UI."""
-        overloaded = getattr(self, '_step3_overloaded', {})
+        """Return dict with overload status; no UI.
+
+        Call prepare_step3_workload() first so that _step3_overloaded and
+        _step3_max_allowed are properly initialised.
+        """
+        overloaded = getattr(self, '_step3_overloaded', set())
         max_all    = getattr(self, '_step3_max_allowed', 99999)
         issues, resolved = [], []
         for teacher in sorted(overloaded):
@@ -249,6 +281,52 @@ class TimetableEngine:
             'issues':       issues,
             'resolved':     resolved,
             'can_proceed':  (not overloaded) or (not issues),
+        }
+
+    def get_class_ct_info(self, cn, teacher, teacher_subject):
+        """Return class-teacher info and parallel-conflict details for one entry.
+
+        Adapted from the original _get_class_ct_info to use plain dict-based
+        class_config_data (no tkinter StringVar).
+
+        Returns a dict:
+          ct                  – class teacher name (str)
+          ct_subjects         – list[str] of subjects the CT teaches in cn
+          is_parallel_with_ct – bool: teacher_subject is parallel to a CT subject
+          parallel_ct_subject – str: the CT subject that is parallel ('' if none)
+        """
+        cd    = self.class_config_data.get(cn, {})
+        ct    = cd.get('teacher', '').strip()
+        subjs = cd.get('subjects', [])
+
+        ct_subjects = [s['name'] for s in subjs
+                       if s.get('teacher', '').strip() == ct]
+
+        is_parallel_with_ct = False
+        parallel_ct_subject = ''
+        for s in subjs:
+            # Primary: teacher teaches teacher_subject, parallel partner is the CT
+            if (s.get('teacher', '').strip() == teacher
+                    and s['name'] == teacher_subject
+                    and s.get('parallel')
+                    and s.get('parallel_teacher', '').strip() == ct):
+                is_parallel_with_ct = True
+                parallel_ct_subject = s.get('parallel_subject', '')
+                break
+            # Reverse: teacher is the *parallel* teacher; CT teaches the primary
+            if (s.get('parallel')
+                    and s.get('parallel_teacher', '').strip() == teacher
+                    and s.get('parallel_subject', '') == teacher_subject
+                    and s.get('teacher', '').strip() == ct):
+                is_parallel_with_ct = True
+                parallel_ct_subject = s['name']
+                break
+
+        return {
+            'ct':                   ct,
+            'ct_subjects':          ct_subjects,
+            'is_parallel_with_ct':  is_parallel_with_ct,
+            'parallel_ct_subject':  parallel_ct_subject,
         }
 
 
