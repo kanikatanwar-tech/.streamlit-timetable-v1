@@ -179,11 +179,36 @@ def _header(title: str, sub: str = ""):
     st.divider()
 
 
+@st.dialog("❌ Wrong File Uploaded")
+def _upload_error_dialog(msg: str):
+    """Modal popup for wrong/invalid file uploads."""
+    st.error(msg)
+    st.markdown("Please upload the **correct file** for this step.")
+    if st.button("OK", type="primary", use_container_width=True):
+        st.rerun()
+
+
+@st.dialog("⚠ Cannot Combine")
+def _combine_error_dialog(msg: str):
+    """Modal popup for combine validation errors in Step 3."""
+    st.error(msg)
+    if st.button("OK", type="primary", use_container_width=True):
+        st.rerun()
+
+
+def _show_upload_error_if_any(key: str):
+    """If session state has an upload error for `key`, show the dialog and clear it."""
+    err = st.session_state.pop(key, None)
+    if err:
+        _upload_error_dialog(err)
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 #  STEP 1
 # ═════════════════════════════════════════════════════════════════════════════
 def page_step1():
     log.info("page_step1: render")
+    _show_upload_error_if_any("_s1_upload_err")   # modal popup for wrong-file uploads
     _header("📋 Step 1: Basic Configuration",
             "Set periods, working days, upload teachers and define class sections.")
     _show_notifications()
@@ -318,6 +343,33 @@ def _load_step1_config(raw: bytes):
     log.info("_load_step1_config: %d bytes", len(raw))
     try:
         d = json.loads(raw.decode("utf-8"))
+    except json.JSONDecodeError as ex:
+        log.error("_load_step1_config: JSON parse error: %s", ex)
+        msg = f"Invalid JSON file: {ex}"
+        st.session_state["_s1_upload_err"] = msg
+        for k in ("_s1_pending_raw", "_s1_pending_hash", "_s1_pending_name"):
+            st.session_state.pop(k, None)
+        st.rerun()
+        return
+
+    required_keys = {"periods_per_day", "working_days", "teacher_names"}
+    if not required_keys.issubset(d.keys()):
+        wrong_hint = ""
+        if "assignments" in d:
+            wrong_hint = " — this looks like a Step 2 Assignments file"
+        elif "step3_data" in d or "step3_unavailability" in d:
+            wrong_hint = " — this looks like a Step 3 config file"
+        msg = (f"Wrong file type{wrong_hint}.\n\n"
+               f"A Step 1 config file must contain: "
+               f"{', '.join(sorted(required_keys))}.")
+        log.error("_load_step1_config: %s", msg)
+        st.session_state["_s1_upload_err"] = msg
+        for k in ("_s1_pending_raw", "_s1_pending_hash", "_s1_pending_name"):
+            st.session_state.pop(k, None)
+        st.rerun()
+        return
+
+    try:
         ppd   = int(d.get("periods_per_day",    7))
         wdays = int(d.get("working_days",        6))
         fhalf = int(d.get("periods_first_half",  4))
@@ -327,21 +379,14 @@ def _load_step1_config(raw: bytes):
         log.info("_load_step1_config: ppd=%d wdays=%d fhalf=%d shalf=%d teachers=%d",
                  ppd, wdays, fhalf, shalf, len(teachers))
 
-        # ── Clear ALL widget keys that will be set from JSON ───────────────────
-        # Streamlit ignores value= if the widget key is already stored.
-        # Deleting forces re-initialisation from value= on the next render.
-        # IMPORTANT: class-section keys (ni_cls_6..12) were missing before —
-        # that caused section counts to silently revert to stale widget values.
         keys_to_clear = (
             ["ni_ppd", "ni_wdays", "ni_fhalf", "ni_shalf"]
             + [f"ni_cls_{cls}" for cls in range(6, 13)]
         )
         for wk in keys_to_clear:
             st.session_state.pop(wk, None)
-            log.debug("_load_step1_config: cleared widget key %s", wk)
 
         sections = {int(k): v for k, v in classes_raw.items()}
-
         st.session_state["ni_ppd"]           = ppd
         st.session_state["ni_wdays"]         = wdays
         st.session_state["ni_fhalf"]         = fhalf
@@ -349,12 +394,9 @@ def _load_step1_config(raw: bytes):
         st.session_state["s1_teachers"]      = teachers
         st.session_state["s1_teacher_fname"] = d.get("teacher_file_path", "")
         st.session_state["s1_sections"]      = sections
-        # Pre-populate class-section widget keys so they show the loaded values
         for cls, nsec in sections.items():
             st.session_state[f"ni_cls_{cls}"] = nsec
-            log.debug("_load_step1_config: ni_cls_%d = %d", cls, nsec)
 
-        # Clear the pending buffer so the Load button disappears after success
         for k in ("_s1_pending_raw", "_s1_pending_hash", "_s1_pending_name"):
             st.session_state.pop(k, None)
 
@@ -363,12 +405,10 @@ def _load_step1_config(raw: bytes):
                 f"{sum(sections.values())} total sections.", "success")
         log.info("_load_step1_config: applied OK — sections=%s", sections)
         st.rerun()
-    except json.JSONDecodeError as ex:
-        log.error("_load_step1_config: JSON error: %s", ex)
-        _notify(f"Invalid JSON: {ex}", "error")
     except Exception as ex:
         log.error("_load_step1_config: %s\n%s", ex, traceback.format_exc())
-        _notify(f"Failed to load: {ex}", "error")
+        st.session_state["_s1_upload_err"] = f"Failed to load config: {ex}"
+        st.rerun()
 
 
 def _load_teacher_bytes(raw: bytes, fname: str):
@@ -382,7 +422,10 @@ def _load_teacher_bytes(raw: bytes, fname: str):
             default=0)
         if max_col > 1:
             log.warning("_load_teacher_bytes: %d columns found, expected 1", max_col)
-            _notify(f"❌ Data in {max_col} columns — use Column A only.", "error"); return
+            st.session_state["_s1_upload_err"] = (
+                f"File has data in {max_col} columns — use Column A only.\n\n"
+                "Each row in Column A should contain exactly one teacher name.")
+            st.rerun(); return
         names = []
         for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=1):
             v = row[0].value
@@ -392,14 +435,21 @@ def _load_teacher_bytes(raw: bytes, fname: str):
                     names.append(n)
         if not names:
             log.warning("_load_teacher_bytes: no names found")
-            _notify("❌ No teacher names found.", "error"); return
+            st.session_state["_s1_upload_err"] = (
+                "No teacher names found in the file.\n\n"
+                "Make sure names are in Column A (Row 1 header 'Teacher Name' is auto-skipped).")
+            st.rerun(); return
         seen, dups = set(), []
         for n in names:
             if n in seen: dups.append(n)
             seen.add(n)
         if dups:
             log.warning("_load_teacher_bytes: duplicates: %s", dups)
-            _notify("❌ Duplicates: " + ", ".join(set(dups)), "error"); return
+            st.session_state["_s1_upload_err"] = (
+                "Duplicate teacher names found:\n\n" +
+                "\n".join(f"  • {d}" for d in sorted(set(dups))) +
+                "\n\nPlease remove duplicates and re-upload.")
+            st.rerun(); return
         names.sort()
         st.session_state["s1_teachers"]      = names
         st.session_state["s1_teacher_fname"] = fname
@@ -408,7 +458,8 @@ def _load_teacher_bytes(raw: bytes, fname: str):
         st.rerun()
     except Exception as ex:
         log.error("_load_teacher_bytes: %s\n%s", ex, traceback.format_exc())
-        _notify(f"Error reading file: {ex}", "error")
+        st.session_state["_s1_upload_err"] = f"Error reading file '{fname}': {ex}"
+        st.rerun()
 
 
 def _step1_save_and_continue():
@@ -464,9 +515,6 @@ def _step1_save_and_continue():
 # ═════════════════════════════════════════════════════════════════════════════
 def page_step2():
     log.info("page_step2: render (%d classes)", len(_all_classes()))
-    _header("👨‍🏫 Step 2: Configure Each Class",
-            "Set class teacher and add subjects with periods, preferences and constraints.")
-    _show_notifications()
 
     cfg       = eng.configuration
     ppd       = cfg["periods_per_day"]
@@ -475,6 +523,19 @@ def page_step2():
     teachers  = sorted(cfg["teacher_names"])
     day_names = DAY_NAMES[:wdays]
     all_cn    = _all_classes()
+
+    # ── Wrong-file upload: show as modal dialog ────────────────────────────────
+    _show_upload_error_if_any("_s2_upload_err")
+
+    # ── Validation errors at VERY TOP — visible without scrolling ─────────────
+    vr = st.session_state.get("s2_validation_result")
+    if vr is not None and not vr.get("ok"):
+        _display_s2_validation(vr)
+        st.divider()
+
+    _header("👨‍🏫 Step 2: Configure Each Class",
+            "Set class teacher and add subjects with periods, preferences and constraints.")
+    _show_notifications()
 
     # ── Save / Load ───────────────────────────────────────────────────────────
     with st.expander("💾 Save / Load Assignments", expanded=False):
@@ -513,169 +574,344 @@ def page_step2():
         if st.button("✓ Validate & Continue to Step 3 →", type="primary"):
             _step2_validate_and_continue()
 
-    vr = st.session_state.get("s2_validation_result")
-    if vr is not None:
-        _display_s2_validation(vr)
-        st.divider()
-
     if not all_cn:
         st.warning("No classes found — go back to Step 1.")
         return
 
-    tabs = st.tabs(all_cn)
-    for tab, cn in zip(tabs, all_cn):
-        with tab:
-            _class_config_tab(cn, teachers, ppd, wdays, required, day_names)
+    st.divider()
+
+    # ── Build grade → sections map ────────────────────────────────────────────
+    all_cn_grouped = {}
+    for cn in all_cn:
+        all_cn_grouped.setdefault(cn[:-1], []).append(cn)
+    grades = sorted(all_cn_grouped.keys(), key=int)
+
+    # ── Single source of truth: s2_active_class ───────────────────────────────
+    # Always derived from here; never reset by widget reruns.
+    if ("s2_active_class" not in st.session_state
+            or st.session_state["s2_active_class"] not in all_cn):
+        st.session_state["s2_active_class"] = all_cn[0]
+
+    act = st.session_state["s2_active_class"]
+
+    def _cn_fmt(cn):
+        cd = eng.class_config_data.get(cn, {})
+        t  = sum(s.get("periods", 0) for s in cd.get("subjects", []))
+        ic = "🟢" if t == required else ("🔴" if t > required else "⚪")
+        return f"{ic} {cn}  ({t}/{required})"
+
+    sel_col, info_col = st.columns([2, 5])
+    with sel_col:
+        st.markdown("**Select Class**")
+
+        # ── Grade row ─────────────────────────────────────────────────────────
+        # Derive current grade from the active class (not from a separate key).
+        # Using a grade-specific widget key ensures the stored value always
+        # matches the current grade's sections list.
+        cur_grade = act[:-1]
+        grade_idx = grades.index(cur_grade) if cur_grade in grades else 0
+
+        chosen_grade = st.radio(
+            "Grade", grades,
+            index=grade_idx,
+            horizontal=True,
+            key="s2_grade_radio",
+            label_visibility="collapsed",
+            format_func=lambda g: f"Class {g}",
+        )
+
+        # ── When grade changes, move to first section of new grade ────────────
+        if chosen_grade != cur_grade:
+            act = all_cn_grouped[chosen_grade][0]
+            st.session_state["s2_active_class"] = act
+            cur_grade = chosen_grade
+
+        sections = all_cn_grouped[cur_grade]
+        sec_idx   = sections.index(act) if act in sections else 0
+
+        # ── Section row ───────────────────────────────────────────────────────
+        # KEY INSIGHT: use a GRADE-SPECIFIC key so values from grade 6 never
+        # pollute grade 7's radio options (which would cause Streamlit to silently
+        # snap back to index 0, making it look like the tab reset).
+        chosen_sec = st.radio(
+            "Section", sections,
+            index=sec_idx,
+            horizontal=True,
+            key=f"s2_sec_{cur_grade}",
+            label_visibility="collapsed",
+        )
+
+        # If user clicked a different section, update and rerun
+        if chosen_sec != act:
+            st.session_state["s2_active_class"] = chosen_sec
+            st.rerun()
+
+        cur_sel = st.session_state["s2_active_class"]
+
+    with info_col:
+        cd_prev = eng.class_config_data.get(cur_sel, {})
+        tot     = sum(s.get("periods", 0) for s in cd_prev.get("subjects", []))
+        diff    = required - tot
+        note    = "✓ exact" if tot == required else (
+            f"need {diff} more" if diff > 0 else f"over by {-diff}")
+        ic      = "🟢" if tot == required else ("🔴" if tot > required else "⚪")
+        st.markdown(f"### Class {cur_sel}")
+        st.caption(f"{ic}  Assigned: **{tot}** / {required}  ({note})  "
+                   f"— {len(cd_prev.get('subjects', []))} subject(s)")
+        with st.expander("📊 All Classes Progress", expanded=False):
+            gcols = st.columns(len(grades))
+            for gi, g in enumerate(grades):
+                with gcols[gi]:
+                    st.markdown(f"**Gr.{g}**")
+                    for cn in all_cn_grouped[g]:
+                        st.caption(_cn_fmt(cn))
+
+    st.divider()
+    _class_config_tab(cur_sel, teachers, ppd, wdays, required, day_names)
 
 
 def _load_step2_assignments(raw: bytes):
+    """Load assignments JSON — shows a modal dialog for wrong file uploads."""
     log.info("_load_step2_assignments: %d bytes", len(raw))
     try:
         d = json.loads(raw.decode("utf-8"))
-        n = 0
-        for cn, saved in d.get("assignments", {}).items():
-            if cn in eng.class_config_data:
-                eng.class_config_data[cn].update({
-                    "teacher":        saved.get("teacher",""),
-                    "teacher_period": saved.get("teacher_period",1),
-                    "subjects":       saved.get("subjects",[]),
-                    "editing_index":  None,
-                })
-                n += 1
-        _notify(f"✓ Assignments loaded for {n} classes.", "success")
-        log.info("_load_step2_assignments: %d classes loaded", n)
+    except json.JSONDecodeError as ex:
+        log.error("_load_step2_assignments: JSON parse error: %s", ex)
+        st.session_state["_s2_upload_err"] = f"Invalid JSON file: {ex}"
         st.rerun()
-    except Exception as ex:
-        log.error("_load_step2_assignments: %s\n%s", ex, traceback.format_exc())
-        _notify(f"Failed: {ex}", "error")
+        return
+
+    if "assignments" not in d:
+        wrong_hint = ""
+        if "periods_per_day" in d or "teacher_names" in d:
+            wrong_hint = "\n\nThis looks like a **Step 1 config** file."
+        elif "step3_data" in d or "step3_unavailability" in d:
+            wrong_hint = "\n\nThis looks like a **Step 3 config** file."
+        msg = (f"Wrong file type for Step 2.{wrong_hint}\n\n"
+               f"Please upload an **Assignments file** (saved from Step 2 → Save/Load).")
+        log.error("_load_step2_assignments: wrong file")
+        st.session_state["_s2_upload_err"] = msg
+        st.rerun()
+        return
+
+    n = 0
+    for cn, saved in d["assignments"].items():
+        if cn in eng.class_config_data:
+            eng.class_config_data[cn].update({
+                "teacher":        saved.get("teacher", ""),
+                "teacher_period": saved.get("teacher_period", 1),
+                "subjects":       saved.get("subjects", []),
+                "editing_index":  None,
+            })
+            _purge_form_state(cn)
+            n += 1
+    _notify(f"✓ Assignments loaded for {n} classes.", "success")
+    log.info("_load_step2_assignments: %d classes loaded", n)
+    st.rerun()
+
+
+def _purge_form_state(cn: str):
+    """Delete ALL form widget keys for class cn from session state.
+
+    This guarantees the add-form shows empty on the next render,
+    regardless of what the user had typed previously.
+    Called after: subject add, subject edit, assignment load.
+    """
+    prefix = f"sf_"
+    needle = f"_{cn}_"
+    to_del = [k for k in list(st.session_state.keys())
+              if k.startswith(prefix) and needle in k]
+    for k in to_del:
+        del st.session_state[k]
+    # Also clear form version so the suffix starts at "a0" again
+    st.session_state.pop(f"s2_fv_{cn}", None)
+    log.debug("_purge_form_state: %s cleared %d keys", cn, len(to_del))
+
+
+def _s2_init_form(cn, suffix, prefill: dict):
+    """Pre-populate form widget keys with prefill values (only on first use).
+
+    Guard: if init_key already set for this suffix, skip (prevents re-init
+    on every rerun while the user is editing the form).
+    """
+    init_key = f"sf_init_{cn}_{suffix}"
+    if st.session_state.get(init_key):
+        return
+    ppd   = eng.configuration["periods_per_day"]
+    wdays = eng.configuration["working_days"]
+    st.session_state[f"sf_name_{cn}_{suffix}"]   = prefill.get("name", "")
+    st.session_state[f"sf_teach_{cn}_{suffix}"]  = prefill.get("teacher", "")
+    st.session_state[f"sf_per_{cn}_{suffix}"]    = int(prefill.get("periods", 1))
+    st.session_state[f"sf_cons_{cn}_{suffix}"]   = prefill.get("consecutive", "No")
+    st.session_state[f"sf_pref_{cn}_{suffix}"]   = [int(p) for p in prefill.get("periods_pref", [])]
+    st.session_state[f"sf_day_{cn}_{suffix}"]    = list(prefill.get("days_pref", []))
+    st.session_state[f"sf_par_{cn}_{suffix}"]    = bool(prefill.get("parallel", False))
+    st.session_state[f"sf_psub_{cn}_{suffix}"]   = prefill.get("parallel_subject", "")
+    st.session_state[f"sf_pteach_{cn}_{suffix}"] = prefill.get("parallel_teacher", "")
+    st.session_state[init_key] = True
+    log.debug("_s2_init_form: %s/%s initialised", cn, suffix)
 
 
 def _class_config_tab(cn, teachers, ppd, wdays, required, day_names):
     log.debug("_class_config_tab: %s", cn)
     cd = eng.class_config_data.setdefault(cn, {
         "subjects": [], "teacher": "", "teacher_period": 1, "editing_index": None})
+    subjects = cd.get("subjects", [])
 
-    total = sum(s.get("periods",0) for s in cd.get("subjects",[]))
-    icon  = "🟢" if total==required else ("🔴" if total>required else "🟡")
-    diff  = required - total
-    note  = "✓ exact" if total==required else (f"need {diff} more" if diff>0 else f"over by {-diff}")
-    st.caption(f"{icon}  Assigned: **{total}** / {required}  ({note})")
-
+    # ── Class Teacher ─────────────────────────────────────────────────────────
     with st.container(border=True):
         st.markdown(f"**Class Teacher — {cn}**")
-        c1, c2 = st.columns([3,1])
+        c1, c2 = st.columns([3, 1])
         with c1:
-            opts    = [""] + teachers
-            cur_ct  = cd.get("teacher","")
-            idx_ct  = opts.index(cur_ct) if cur_ct in opts else 0
-            sel_ct  = st.selectbox("Class Teacher", opts, index=idx_ct, key=f"ct_{cn}")
+            opts   = [""] + teachers
+            cur_ct = cd.get("teacher", "")
+            sel_ct = st.selectbox("Class Teacher", opts,
+                                   index=opts.index(cur_ct) if cur_ct in opts else 0,
+                                   key=f"ct_{cn}")
             cd["teacher"] = sel_ct
         with c2:
-            cur_per = int(cd.get("teacher_period",1))
+            cur_per = int(cd.get("teacher_period", 1))
             sel_per = st.number_input("CT Period", 1, ppd, cur_per, key=f"ctp_{cn}")
             cd["teacher_period"] = int(sel_per)
 
-    subjects = cd.get("subjects",[])
+    # ── Subject List ──────────────────────────────────────────────────────────
     if subjects:
         with st.container(border=True):
             st.markdown("**Subjects**")
-            hdr = st.columns([0.4,2.2,2.2,0.9,1.0,1.0,0.7,0.7])
-            for h, t in zip(hdr, ["#","Subject","Teacher","Periods","Consec","Parallel","✏","🗑"]):
+            hdr = st.columns([0.4, 2.2, 2.2, 0.9, 1.0, 1.0, 0.7, 0.7])
+            for h, t in zip(hdr, ["#", "Subject", "Teacher", "Periods",
+                                   "Consec", "Parallel", "✏", "🗑"]):
                 h.markdown(f"**{t}**")
             for i, s in enumerate(subjects):
-                row = st.columns([0.4,2.2,2.2,0.9,1.0,1.0,0.7,0.7])
-                row[0].write(str(i+1))
-                row[1].write(s.get("name","—"))
-                row[2].write(s.get("teacher","—"))
-                row[3].write(str(s.get("periods","")))
-                row[4].write("Yes" if s.get("consecutive")=="Yes" else "—")
+                row = st.columns([0.4, 2.2, 2.2, 0.9, 1.0, 1.0, 0.7, 0.7])
+                row[0].write(str(i + 1))
+                row[1].write(s.get("name", "—"))
+                row[2].write(s.get("teacher", "—"))
+                row[3].write(str(s.get("periods", "")))
+                row[4].write("Yes" if s.get("consecutive") == "Yes" else "—")
                 row[5].write("✓" if s.get("parallel") else "—")
                 if row[6].button("✏", key=f"edit_{cn}_{i}"):
                     log.debug("_class_config_tab: %s edit %d", cn, i)
-                    cd["editing_index"] = i; st.rerun()
+                    cd["editing_index"] = i
+                    # Remove init flag so edit form re-loads correct prefill
+                    st.session_state.pop(f"sf_init_{cn}_e{i}", None)
+                    st.rerun()
                 if row[7].button("🗑", key=f"del_{cn}_{i}"):
-                    log.info("_class_config_tab: %s delete %d '%s'", cn, i, s.get("name",""))
+                    log.info("_class_config_tab: %s delete %d '%s'", cn, i, s.get("name", ""))
                     subjects.pop(i)
                     ei = cd.get("editing_index")
-                    if ei == i: cd["editing_index"] = None
-                    elif ei and ei > i: cd["editing_index"] = ei - 1
+                    if ei == i:
+                        cd["editing_index"] = None
+                    elif ei is not None and ei > i:
+                        cd["editing_index"] = ei - 1
                     st.rerun()
 
+    # ── Add / Edit Form ───────────────────────────────────────────────────────
     editing_idx = cd.get("editing_index")
-    prefill     = (subjects[editing_idx]
-                   if editing_idx is not None and editing_idx < len(subjects) else {})
-    form_title  = f"✏ Edit Subject #{editing_idx+1}" if editing_idx is not None else "➕ Add Subject"
+    form_ver    = st.session_state.get(f"s2_fv_{cn}", 0)
+
+    if editing_idx is not None and editing_idx < len(subjects):
+        suffix     = f"e{editing_idx}"
+        prefill    = subjects[editing_idx]
+        form_title = f"✏ Edit Subject #{editing_idx + 1}"
+    else:
+        suffix     = f"a{form_ver}"
+        prefill    = {}
+        form_title = "➕ Add Subject"
+
+    _s2_init_form(cn, suffix, prefill)
 
     with st.container(border=True):
         st.markdown(f"**{form_title}**")
-        c1,c2,c3 = st.columns(3)
+
+        # ── Error display at TOP of form — no scrolling needed ────────────
+        form_err_key = f"s2_form_err_{cn}"
+        if form_err_key in st.session_state:
+            st.error(st.session_state.pop(form_err_key))
+
+        c1, c2, c3 = st.columns(3)
         with c1:
-            name = st.text_input("Subject Name", value=prefill.get("name",""), key=f"sf_name_{cn}")
+            name = st.text_input("Subject Name",
+                                  key=f"sf_name_{cn}_{suffix}")
         with c2:
-            t_val = prefill.get("teacher","")
             opts  = [""] + teachers
             sel_t = st.selectbox("Teacher", opts,
-                                  index=opts.index(t_val) if t_val in opts else 0,
-                                  key=f"sf_teach_{cn}")
+                                  key=f"sf_teach_{cn}_{suffix}")
         with c3:
-            pers = st.number_input("Periods/week", 1, ppd*wdays,
-                                   int(prefill.get("periods",1)), key=f"sf_per_{cn}")
-        c4,c5 = st.columns(2)
+            pers = st.number_input("Periods/week", 1, ppd * wdays,
+                                    key=f"sf_per_{cn}_{suffix}")
+        c4, c5 = st.columns(2)
         with c4:
-            consec = st.selectbox("Consecutive?", ["No","Yes"],
-                                   index=1 if prefill.get("consecutive")=="Yes" else 0,
-                                   key=f"sf_cons_{cn}")
+            consec = st.selectbox("Consecutive?", ["No", "Yes"],
+                                   key=f"sf_cons_{cn}_{suffix}")
         with c5:
-            p_prefs = st.multiselect("Period prefs (optional)", list(range(1,ppd+1)),
-                                      default=[int(p) for p in prefill.get("periods_pref",[])],
-                                      key=f"sf_pref_{cn}")
+            p_prefs = st.multiselect("Period prefs (optional)", list(range(1, ppd + 1)),
+                                      key=f"sf_pref_{cn}_{suffix}")
         d_prefs = st.multiselect("Day prefs (optional)", day_names,
-                                  default=[d for d in prefill.get("days_pref",[]) if d in day_names],
-                                  key=f"sf_day_{cn}")
-        par = st.checkbox("Parallel teaching?", value=bool(prefill.get("parallel")),
-                           key=f"sf_par_{cn}")
+                                  key=f"sf_day_{cn}_{suffix}")
+        par = st.checkbox("Parallel teaching?",
+                           key=f"sf_par_{cn}_{suffix}")
         par_subj = par_teach = ""
         if par:
-            cp1,cp2 = st.columns(2)
+            cp1, cp2 = st.columns(2)
             with cp1:
                 par_subj = st.text_input("Parallel subject",
-                                          value=prefill.get("parallel_subject",""),
-                                          key=f"sf_psub_{cn}")
+                                          key=f"sf_psub_{cn}_{suffix}")
             with cp2:
-                pt_val = prefill.get("parallel_teacher","")
-                opts2  = [""] + teachers
+                opts2     = [""] + teachers
                 par_teach = st.selectbox("Parallel teacher", opts2,
-                                          index=opts2.index(pt_val) if pt_val in opts2 else 0,
-                                          key=f"sf_pteach_{cn}")
+                                          key=f"sf_pteach_{cn}_{suffix}")
 
         btn1, btn2 = st.columns(2)
         with btn1:
             lbl = "✓ Update" if editing_idx is not None else "✓ Add Subject"
-            if st.button(lbl, key=f"sf_save_{cn}", type="primary"):
+            if st.button(lbl, key=f"sf_save_{cn}_{suffix}", type="primary",
+                         use_container_width=True):
                 log.info("_class_config_tab: %s save '%s'", cn, name)
                 if not name.strip():
-                    _notify("Subject name required.", "error")
+                    # Store error in session state → shows at TOP on rerun
+                    st.session_state[form_err_key] = "⚠ Subject name is required."
+                    st.rerun()
                 elif not sel_t:
-                    _notify("Select a teacher.", "error")
+                    st.session_state[form_err_key] = "⚠ Please select a teacher."
+                    st.rerun()
                 else:
                     entry = {
-                        "name":             name.strip(), "teacher": sel_t,
-                        "periods":          int(pers),    "consecutive": consec,
-                        "periods_pref":     p_prefs,      "days_pref": d_prefs,
-                        "parallel":         par,          "parallel_subject": par_subj.strip(),
+                        "name":             name.strip(),
+                        "teacher":          sel_t,
+                        "periods":          int(pers),
+                        "consecutive":      consec,
+                        "periods_pref":     p_prefs,
+                        "days_pref":        d_prefs,
+                        "parallel":         par,
+                        "parallel_subject": par_subj.strip(),
                         "parallel_teacher": par_teach,
                     }
                     if editing_idx is not None:
                         subjects[editing_idx] = entry
-                        cd["editing_index"]   = None
+                        cd["editing_index"] = None
+                        # Clean up edit-key init flag
+                        st.session_state.pop(f"sf_init_{cn}_e{editing_idx}", None)
+                        st.toast(f"✓ '{name.strip()}' updated.", icon="✅")
                     else:
                         subjects.append(entry)
-                    _notify(f"✓ '{name.strip()}' saved.", "success")
+                        # ── Form clearing: increment form_ver so the next render
+                        # uses a completely NEW key suffix (e.g. a1, a2 ...).
+                        # Streamlit has no stored value for the new keys, so
+                        # _s2_init_form will initialise them all to empty.
+                        # This is more reliable than deleting existing widget keys
+                        # because Streamlit may still read from its internal cache.
+                        new_ver = form_ver + 1
+                        st.session_state[f"s2_fv_{cn}"] = new_ver
+                        st.toast(f"✓ '{name.strip()}' added.", icon="✅")
+                    cd["editing_index"] = None
                     st.rerun()
         with btn2:
             if editing_idx is not None:
-                if st.button("✕ Cancel", key=f"sf_cancel_{cn}"):
-                    cd["editing_index"] = None; st.rerun()
+                if st.button("✕ Cancel", key=f"sf_cancel_{cn}",
+                             use_container_width=True):
+                    cd["editing_index"] = None
+                    st.rerun()
 
 
 def _step2_validate_and_continue():
@@ -1126,10 +1362,33 @@ def _load_step3_config(raw: bytes):
     log.info("_load_step3_config: %d bytes", len(raw))
     try:
         d = json.loads(raw.decode("utf-8"))
-        eng.step3_data = d.get("step3_data",{})
+    except json.JSONDecodeError as ex:
+        log.error("_load_step3_config: JSON parse error: %s", ex)
+        st.toast(f"❌ Invalid JSON file: {ex}", icon="🚫")
+        _notify(f"❌ Invalid JSON: {ex}", "error")
+        st.rerun()
+        return
+
+    # ── FIX 3: Validate file structure ──────────────────────────────────────
+    if "step3_data" not in d and "step3_unavailability" not in d:
+        wrong_hint = ""
+        if "assignments" in d:
+            wrong_hint = " (looks like a Step 2 Assignments file)"
+        elif "periods_per_day" in d or "teacher_names" in d:
+            wrong_hint = " (looks like a Step 1 config file)"
+        msg = (f"❌ Wrong file type{wrong_hint} — expected a Step 3 config file with "
+               f"'step3_data' or 'step3_unavailability' keys.")
+        log.error("_load_step3_config: %s", msg)
+        st.toast(msg, icon="🚫")
+        _notify(msg, "error")
+        st.rerun()
+        return
+
+    try:
+        eng.step3_data = d.get("step3_data", {})
         eng.step3_unavailability = {
-            t:{"days":v.get("days",[]),"periods":v.get("periods",[])}
-            for t,v in d.get("step3_unavailability",{}).items()
+            t: {"days": v.get("days", []), "periods": v.get("periods", [])}
+            for t, v in d.get("step3_unavailability", {}).items()
         }
         _notify("✓ Step 3 config loaded.", "success")
         log.info("_load_step3_config: %d teachers, %d unavail",
@@ -1258,13 +1517,12 @@ def _render_workload(teachers, wdays, ppd):
 
 
 def _render_teacher_combine_detail(teacher):
-    """Full assignment + combine panel for a selected teacher.
-
-    Mirrors the original right panel:
-      • Header (red if overloaded, green if OK) with Assigned / Effective / Max
-      • Left side: checkboxes per assignment with CT info + parallel-CT warnings
-      • Right side: '✓ Combine Checked Entries' button + list of existing combines
-    """
+    """Full assignment + combine panel for a selected teacher."""
+    # ── Combine error: show as modal dialog (not top-of-page) ─────────────────
+    combine_err = st.session_state.pop("_s3_combine_err", None)
+    if combine_err:
+        _combine_error_dialog(combine_err)
+        return  # dialog is open; rest of page renders behind it
     wl        = getattr(eng, "_step3_teacher_wl", {})
     info      = wl.get(teacher, {"total": 0, "entries": []})
     entries   = info["entries"]
@@ -1369,7 +1627,7 @@ def _render_teacher_combine_detail(teacher):
                             "force the parallel subject into the same fixed slot.")
 
             if err:
-                _notify(err, "error")
+                st.session_state["_s3_combine_err"] = err
             else:
                 s3d["combines"].append({
                     "entry_indices": idxs,
