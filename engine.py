@@ -1731,13 +1731,30 @@ class TimetableEngine:
                         blocked_by = (cn, existing)
                         break
 
-                if blocked_by is None:
-                    self._gen_place(task, d, p)
-                else:
+                if blocked_by is not None:
                     cn_blk, cell_blk = blocked_by
                     blocked_slots.append((DAYS[d], p + 1,
                                           cell_blk.get('subject', '?'),
                                           cell_blk.get('teacher', '?')))
+                    continue
+
+                # ── BUG FIX: also check teacher availability before placing ──
+                # HC2 only checked grid cells, never t_free → same teacher
+                # could be double-booked in two classes at the same slot.
+                t_blk = None
+                _t_free = g['t_free']
+                if not _t_free(task['teacher'], d, p):
+                    t_blk = task['teacher']
+                else:
+                    _pt = (task.get('par_teach') or '').strip()
+                    if _pt and _pt not in ('—', '?') and not _t_free(_pt, d, p):
+                        t_blk = _pt
+
+                if t_blk is None:
+                    self._gen_place(task, d, p)
+                else:
+                    blocked_slots.append((DAYS[d], p + 1,
+                                          'TEACHER BUSY', t_blk))
 
             if task['remaining'] > 0:
                 # Still unplaced periods — report each blocked slot
@@ -2232,10 +2249,17 @@ class TimetableEngine:
             t['rx_sc3'] = True
 
         # ── B-1: force-complete — stuff remaining into any free class slot ──
+        # BUG FIX: prefer teacher-free slots first; only fall back to any empty
+        # cell if no conflict-free slot exists.  The original code ignored teacher
+        # availability entirely, creating avoidable double-bookings that Stage B-3
+        # then had to repair (and sometimes couldn't in 1500 iterations).
         _prog("Stage B — force-completing grid…")
-        for task in sorted(tasks, key=lambda t: -t['remaining']):
-            if task['remaining'] <= 0:
-                continue
+
+        def _b1_place_task(task, require_teacher_free):
+            """Place all remaining periods of task.  Returns True if any placed."""
+            t_name = task['teacher']
+            pt_b1  = (task.get('par_teach') or '').strip()
+            placed_any = False
             for d in range(wdays):
                 if task['remaining'] <= 0:
                     break
@@ -2247,21 +2271,35 @@ class TimetableEngine:
                     if not cells_free:
                         continue
                     # Don't overwrite HC1 slots
-                    hc1 = False
-                    for cn in task['cn_list']:
-                        bidx = g['task_at'][cn][d][p]
-                        if bidx is not None and tasks[bidx]['priority'] == 'HC1':
-                            hc1 = True; break
+                    hc1 = any(
+                        g['task_at'][cn][d][p] is not None and
+                        tasks[g['task_at'][cn][d][p]]['priority'] == 'HC1'
+                        for cn in task['cn_list'])
                     if hc1:
                         continue
+                    if require_teacher_free:
+                        if not g['t_free'](t_name, d, p):
+                            continue
+                        if pt_b1 and pt_b1 not in ('—', '?') and not g['t_free'](pt_b1, d, p):
+                            continue
                     for cn in task['cn_list']:
                         grid[cn][d][p] = self._gen_make_cell(task)
                         g['task_at'][cn][d][p] = task['idx']
-                    g['t_mark'](task['teacher'], d, p)
-                    pt = task.get('par_teach', '')
-                    if pt and pt not in ('', '—', '?'):
-                        g['t_mark'](pt, d, p)
+                    g['t_mark'](t_name, d, p)
+                    if pt_b1 and pt_b1 not in ('—', '?'):
+                        g['t_mark'](pt_b1, d, p)
                     task['remaining'] -= 1
+                    placed_any = True
+            return placed_any
+
+        for task in sorted(tasks, key=lambda t: -t['remaining']):
+            if task['remaining'] <= 0:
+                continue
+            # Pass 1: only use teacher-free slots (no new conflict)
+            _b1_place_task(task, require_teacher_free=True)
+            # Pass 2: fall back to any empty cell (creates conflict for B-3 to fix)
+            if task['remaining'] > 0:
+                _b1_place_task(task, require_teacher_free=False)
 
         # If still unplaced after B-1, the problem is truly infeasible
         if _unplaced() > 0:
@@ -2348,11 +2386,17 @@ class TimetableEngine:
                         if pt2 and pt2 not in ('', '—', '?'):
                             g['t_unmark'](pt2, d, p)
                         t['remaining'] += 1
-                    # Re-place greedily
-                    free_slots = [(d, p) for d in range(wdays)
-                                  for p in range(ppd)
-                                  if all(grid[cn][d][p] is None
-                                         for cn in t['cn_list'])]
+                    # BUG FIX: prefer teacher-free slots when re-placing;
+                    # fall back to any empty cell only if no conflict-free slot exists.
+                    t_name_r  = t['teacher']
+                    pt2_r     = (t.get('par_teach') or '').strip()
+                    all_free  = [(d, p) for d in range(wdays) for p in range(ppd)
+                                 if all(grid[cn][d][p] is None for cn in t['cn_list'])]
+                    tf_free   = [dp for dp in all_free
+                                 if g['t_free'](t_name_r, dp[0], dp[1])
+                                 and (not pt2_r or pt2_r in ('—', '?')
+                                      or g['t_free'](pt2_r, dp[0], dp[1]))]
+                    free_slots = tf_free if tf_free else all_free
                     _rnd.shuffle(free_slots)
                     for d, p in free_slots:
                         if t['remaining'] <= 0:
@@ -2405,7 +2449,7 @@ class TimetableEngine:
 
             # Find free class slot with minimum teacher conflicts
             best_score = None
-            best_d, best_p = worst_d, worst_p   # fallback = same slot
+            best_d, best_p = None, None
             for d in range(wdays):
                 for p in range(ppd):
                     cells_free = all(
@@ -2421,6 +2465,14 @@ class TimetableEngine:
                         break
                 if best_score == 0:
                     break
+
+            # BUG FIX: if no truly better slot found (or worst slot WAS the
+            # only option), restore to worst_slot instead of wasting an
+            # iteration that makes no progress.
+            if best_d is None or best_score >= _slot_conflicts(
+                    target['teacher'], pt, worst_d, worst_p, target['idx']):
+                # No improvement available — restore in place and move on
+                best_d, best_p = worst_d, worst_p
 
             # Place at best slot
             for cn in target['cn_list']:
@@ -3317,4 +3369,3 @@ class TimetableEngine:
                 ws.column_dimensions[get_column_letter(p+3)].width = 18
 
         wb.save(filename)  # filename can be a file path or BytesIO
-
