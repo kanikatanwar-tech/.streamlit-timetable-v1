@@ -74,10 +74,13 @@ def _init_state():
         "_s1_pending_raw":   None,
         "_s1_pending_hash":  None,
         "_s1_pending_name":  None,
-        # Step-4
+        # Step-4 (kept for internal engine use)
         "s4_stage":          0,
         "s4_s1_status":      None,
         "s4_s3_status":      None,
+        "s4_ff_result":      None,
+        # Auto-generation result
+        "gen_result":        None,
         # Task-analysis
         "ta_allocation":     None,
         "ta_group_slots":    None,
@@ -89,6 +92,13 @@ def _init_state():
         # Validation caches
         "s2_validation_result": None,
         "s3_validation_result": None,
+        # Step gate-keeping — each step must be validated before the next is shown
+        "s1_validated":      False,
+        "s2_validated":      False,
+        "s3_validated":      False,
+        # Popup error triggers
+        "_s2_show_error_popup": False,
+        "_s3_show_error_popup": False,
         # Pending notifications (cleared each render)
         "_notify":           [],
     }
@@ -166,10 +176,7 @@ PAGE_LABELS = {
     "step1":           "Step 1 — Basic Config",
     "step2":           "Step 2 — Class Assignments",
     "step3":           "Step 3 — Teacher Settings",
-    "step4":           "Step 4 — Generate",
-    "task_analysis":   "Task Analysis",
-    "task_analysis2":  "Task Analysis 2",
-    "stage2_page":     "Stage 2",
+    "generate":        "Step 4 — Generate",
     "final_timetable": "Final Timetable",
 }
 
@@ -195,6 +202,75 @@ def _combine_error_dialog(msg: str):
     if st.button("OK", type="primary", use_container_width=True):
         st.rerun()
 
+@st.dialog("❌ Step 1 — Validation Errors")
+def _step1_error_dialog(errors: list):
+    """Modal popup listing all Step 1 validation errors with fix advice."""
+    for err in errors:
+        st.error(err["msg"])
+        if err.get("fix"):
+            st.info(f"💡 **How to fix:** {err['fix']}")
+    st.divider()
+    st.caption("Fix all errors above, then click **Continue to Step 2** again.")
+    if st.button("Close", type="primary", use_container_width=True):
+        st.rerun()
+
+
+@st.dialog("❌ Step 2 — Validation Errors")
+def _step2_error_dialog(vr: dict):
+    """Modal popup summarising Step 2 validation errors with fix advice."""
+    period_errors  = vr.get("period_errors", [])
+    hard_conflicts = vr.get("hard_conflicts", [])
+    wcc            = vr.get("within_class_conflicts", [])
+    total = len(period_errors) + len(hard_conflicts) + len(wcc)
+    st.error(f"**{total} error(s) found.** Fix all issues, then click Validate & Continue again.")
+    st.divider()
+    if period_errors:
+        st.markdown(f"**① Period Mismatches — {len(period_errors)} class(es)**")
+        for cn, msg in period_errors[:5]:
+            st.warning(f"**{cn}:** {msg}")
+            st.caption("💡 Add/remove subjects so total periods = periods/day × working days.")
+        if len(period_errors) > 5:
+            st.caption(f"… and {len(period_errors)-5} more — scroll Step 2 for all details.")
+    if hard_conflicts:
+        st.markdown(f"**② Teacher Conflicts — {len(hard_conflicts)} conflict(s)**")
+        for c in hard_conflicts[:3]:
+            reason = c["reason"]
+            st.warning(f"**{c['teacher']}:** {reason[:150]}{'...' if len(reason)>150 else ''}")
+            st.caption("💡 Change period/day preference so the teacher is not double-booked.")
+        if len(hard_conflicts) > 3:
+            st.caption(f"… and {len(hard_conflicts)-3} more — scroll Step 2 for details.")
+    if wcc:
+        st.markdown(f"**③ Within-Class Slot Conflicts — {len(wcc)} conflict(s)**")
+        for c in wcc[:3]:
+            reason = c["reason"]
+            st.warning(f"**{c['class']} / {c['day']}:** {reason[:150]}{'...' if len(reason)>150 else ''}")
+            st.caption("💡 Adjust period/day preferences so subjects don't compete for the same slot.")
+        if len(wcc) > 3:
+            st.caption(f"… and {len(wcc)-3} more — scroll Step 2 for details.")
+    if st.button("Close & Fix Issues", type="primary", use_container_width=True):
+        st.rerun()
+
+
+@st.dialog("❌ Step 3 — Validation Errors")
+def _step3_error_dialog(vr: dict):
+    """Modal popup for Step 3 overload errors with fix advice."""
+    issues = vr.get("issues", [])
+    st.error(f"**{len(issues)} overloaded teacher(s) must be resolved before generating.**")
+    st.divider()
+    for ln in issues[:8]:
+        st.warning(ln)
+    if len(issues) > 8:
+        st.caption(f"... and {len(issues)-8} more.")
+    st.divider()
+    st.info(
+        "**How to fix:**\n"
+        "- Use **Combine Classes** tab to merge identical lessons across sections — "
+        "this reduces the teacher's effective period count.\n"
+        "- Or click **⏭ Skip** on the teacher card to bypass the overload check (use with caution)."
+    )
+    if st.button("Close & Fix Issues", type="primary", use_container_width=True):
+        st.rerun()
+
 
 def _show_upload_error_if_any(key: str):
     """If session state has an upload error for `key`, show the dialog and clear it."""
@@ -209,6 +285,9 @@ def _show_upload_error_if_any(key: str):
 def page_step1():
     log.info("page_step1: render")
     _show_upload_error_if_any("_s1_upload_err")   # modal popup for wrong-file uploads
+    # Show validation error dialog if triggered by continue button
+    if st.session_state.get("_s1_val_errors"):
+        _step1_error_dialog(st.session_state.pop("_s1_val_errors"))
     _header("📋 Step 1: Basic Configuration",
             "Set periods, working days, upload teachers and define class sections.")
     _show_notifications()
@@ -474,15 +553,21 @@ def _step1_save_and_continue():
     log.debug("_step1_save_and_continue: ppd=%d wdays=%d fhalf=%d shalf=%d teachers=%d",
               ppd, wdays, fhalf, shalf, len(teachers))
 
+    errors = []
     if ppd <= 0 or wdays <= 0:
-        log.warning("_step1_save_and_continue: invalid ppd/wdays")
-        _notify("Periods and days must be ≥ 1.", "error"); return
+        errors.append({"msg": "Periods per day and working days must be ≥ 1.",
+                        "fix": "Set valid values in the Periods & Working Days section."})
     if fhalf + shalf != ppd:
-        log.warning("_step1_save_and_continue: halves %d+%d≠%d", fhalf, shalf, ppd)
-        _notify(f"Halves mismatch: {fhalf}+{shalf}={fhalf+shalf}, need {ppd}.", "error"); return
+        errors.append({"msg": f"Halves mismatch: {fhalf} + {shalf} = {fhalf+shalf}, but need {ppd}.",
+                        "fix": "Adjust 'Periods — first half' or 'Periods — second half' so they add up to Periods per day."})
     if not teachers:
-        log.warning("_step1_save_and_continue: no teachers")
-        _notify("Upload teacher file first.", "error"); return
+        errors.append({"msg": "No teacher list loaded.",
+                        "fix": "Upload a teacher Excel file (Column A, one name per row)."})
+    if errors:
+        log.warning("_step1_save_and_continue: %d validation errors", len(errors))
+        st.session_state["_s1_val_errors"] = errors
+        st.rerun()
+        return
 
     sections = dict(st.session_state.s1_sections)
     eng.configuration = {
@@ -507,6 +592,9 @@ def _step1_save_and_continue():
                 }
     log.info("_step1_save_and_continue: %d classes ready → step2",
              len(eng.class_config_data))
+    st.session_state["s1_validated"] = True
+    st.session_state["s2_validated"] = False
+    st.session_state["s3_validated"] = False
     _nav("step2")
 
 
@@ -515,6 +603,10 @@ def _step1_save_and_continue():
 # ═════════════════════════════════════════════════════════════════════════════
 def page_step2():
     log.info("page_step2: render (%d classes)", len(_all_classes()))
+
+    # Show validation error popup if triggered
+    if st.session_state.get("_s2_val_errors"):
+        _step2_error_dialog(st.session_state.pop("_s2_val_errors"))
 
     cfg       = eng.configuration
     ppd       = cfg["periods_per_day"]
@@ -526,12 +618,6 @@ def page_step2():
 
     # ── Wrong-file upload: show as modal dialog ────────────────────────────────
     _show_upload_error_if_any("_s2_upload_err")
-
-    # ── Validation errors at VERY TOP — visible without scrolling ─────────────
-    vr = st.session_state.get("s2_validation_result")
-    if vr is not None and not vr.get("ok"):
-        _display_s2_validation(vr)
-        st.divider()
 
     _header("👨‍🏫 Step 2: Configure Each Class",
             "Set class teacher and add subjects with periods, preferences and constraints.")
@@ -567,12 +653,28 @@ def page_step2():
                     _load_step2_assignments(raw)
 
     # ── Navigation ────────────────────────────────────────────────────────────
-    cb, cc = st.columns([1, 3])
+    s2_validated = st.session_state.get("s2_validated", False)
+    cb, cv, cc = st.columns([1, 2, 2])
     with cb:
-        if st.button("← Back to Step 1"): _nav("step1")
-    with cc:
-        if st.button("✓ Validate & Continue to Step 3 →", type="primary"):
+        if st.button("← Back to Step 1", use_container_width=True):
+            _nav("step1")
+    with cv:
+        if st.button("🔍 Validate Step 2", use_container_width=True,
+                     help="Check period counts and teacher conflicts"):
             _step2_validate_and_continue()
+    with cc:
+        if s2_validated:
+            if st.button("✓ Continue to Step 3 →", type="primary", use_container_width=True):
+                _nav("step3")
+        else:
+            st.button("✓ Continue to Step 3 →", type="primary",
+                      use_container_width=True, disabled=True,
+                      help="Run Validate Step 2 first and fix any errors")
+
+    if s2_validated:
+        st.success("✅ Step 2 validated — click **Continue to Step 3** to proceed.")
+    else:
+        st.info("ℹ️ Fill in all class subjects, then click **🔍 Validate Step 2** to check for errors.")
 
     if not all_cn:
         st.warning("No classes found — go back to Step 1.")
@@ -1154,13 +1256,15 @@ def _step2_validate_and_continue():
     st.session_state["s2_validation_result"] = vr
 
     if vr["ok"]:
-        _notify("✅ All validation checks passed — proceeding to Step 3.", "success")
+        st.session_state["s2_validated"] = True
+        st.session_state["s3_validated"] = False  # Reset downstream
+        _notify("✅ All validation checks passed — click Continue to Step 3.", "success")
         _nav("step3")
     else:
         total_err = len(period_errors) + len(hard_conflicts) + len(within_class_conflicts)
-        _notify(
-            f"❌ {total_err} error(s) found — fix all issues below, then validate again.",
-            "error")
+        st.session_state["s2_validated"] = False
+        st.session_state["_s2_val_errors"] = vr
+        log.warning("_step2_validate: %d errors found, showing popup", total_err)
         st.rerun()
 
 
@@ -1307,11 +1411,19 @@ def page_step3():
                 elif not _already_processed("s3_load_json", raw):
                     _load_step3_config(raw)
 
+    # Show step 3 error popup if triggered
+    if st.session_state.get("_s3_show_error_popup"):
+        st.session_state["_s3_show_error_popup"] = False
+        vr_err = st.session_state.get("s3_validation_result")
+        if vr_err and not vr_err.get("can_proceed"):
+            _step3_error_dialog(vr_err)
+
     cb, cv, cc = st.columns(3)
     with cb:
-        if st.button("← Back to Step 2"): _nav("step2")
+        if st.button("← Back to Step 2", use_container_width=True):
+            _nav("step2")
     with cv:
-        if st.button("🔍 Validate Step 3"):
+        if st.button("🔍 Validate Step 3", use_container_width=True):
             log.info("page_step3: validate")
             try:
                 eng.prepare_step3_workload()
@@ -1319,36 +1431,47 @@ def page_step3():
                 st.session_state["s3_validation_result"] = vr
                 log.info("page_step3: validate result can_proceed=%s issues=%d",
                          vr["can_proceed"], len(vr["issues"]))
-                if vr["can_proceed"]: _notify("✅ All clear.", "success")
-                else: _notify(f"❌ {len(vr['issues'])} overload(s) unresolved.", "error")
+                if vr["can_proceed"]:
+                    st.session_state["s3_validated"] = True
+                    _notify("✅ All clear — click Generate Timetable to proceed.", "success")
+                else:
+                    st.session_state["s3_validated"] = False
+                    st.session_state["_s3_show_error_popup"] = True
+                    log.warning("page_step3: %d overloads, showing popup", len(vr["issues"]))
             except Exception as ex:
                 log.error("page_step3 validate: %s\n%s", ex, traceback.format_exc())
                 _notify(f"Validation error: {ex}", "error")
             st.rerun()
     with cc:
-        if st.button("➤ Proceed to Step 4 →", type="primary"):
-            log.info("page_step3: proceed to step4")
-            try:
-                eng.prepare_step3_workload()
-                vr = eng.validate_step3()
-                if vr["can_proceed"]:
-                    _nav("step4")
-                else:
-                    log.warning("page_step3: blocked, %d overloads", len(vr["issues"]))
-                    _notify("Fix or skip overloaded teachers first.", "error"); st.rerun()
-            except Exception as ex:
-                log.error("page_step3 proceed: %s\n%s", ex, traceback.format_exc())
-                _notify(f"Error: {ex}", "error"); st.rerun()
+        s3_validated = st.session_state.get("s3_validated", False)
+        if s3_validated:
+            if st.button("🚀 Generate Timetable →", type="primary", use_container_width=True):
+                log.info("page_step3: proceed to generate")
+                st.session_state["s3_validated"] = True
+                for k in ("s4_stage","s4_s1_status","ta_allocation","ta2_allocation",
+                          "s4_s3_status","s4_ff_result","gen_result"):
+                    st.session_state[k] = 0 if k == "s4_stage" else None
+                _nav("generate")
+        else:
+            st.button("🚀 Generate Timetable →", type="primary",
+                      use_container_width=True, disabled=True,
+                      help="Run Validate Step 3 first and resolve any overloads")
+
+    # Status message
+    s3v = st.session_state.get("s3_validated", False)
+    if s3v:
+        st.success("✅ Step 3 validated — click **Generate Timetable** to proceed.")
+    else:
+        st.info("ℹ️ Review teacher workloads, set up combines, then click **🔍 Validate Step 3**.")
 
     vr = st.session_state.get("s3_validation_result")
-    if vr:
-        if vr["can_proceed"]: st.success("✅ All overloads resolved or skipped.")
-        if vr["issues"]:
-            with st.expander("❌ Still Overloaded", expanded=True):
-                for ln in vr["issues"]: st.error(ln)
-        if vr["resolved"]:
-            with st.expander("✓ Resolved / Skipped"):
-                for ln in vr["resolved"]: st.success(ln)
+    if vr and not vr.get("can_proceed") and vr.get("issues"):
+        with st.expander("❌ Still Overloaded — expand for details", expanded=False):
+            for ln in vr["issues"]:
+                st.error(ln)
+    if vr and vr.get("resolved"):
+        with st.expander("✓ Resolved / Skipped"):
+            for ln in vr["resolved"]: st.success(ln)
 
     st.divider()
     tab_wl, tab_cb, tab_un = st.tabs(
@@ -1763,7 +1886,143 @@ def _render_unavailability_tab(teachers, day_names, ppd):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  STEP 4
+#  GENERATE PAGE  (Step 3 → Final Timetable, fully automatic)
+# ═════════════════════════════════════════════════════════════════════════════
+def page_generate():
+    log.info("page_generate: render")
+    cfg   = eng.configuration
+    ppd   = cfg.get("periods_per_day", "?")
+    wdays = cfg.get("working_days", "?")
+    _header("🚀 Generating Timetable",
+            f"{wdays} days/week · {ppd} periods/day — fully automatic")
+    _show_notifications()
+
+    col_back, _spacer = st.columns([1, 2])
+    with col_back:
+        if st.button("← Back to Step 3"):
+            _nav("step3")
+
+    gen_result = st.session_state.get("gen_result")
+
+    # ── RUN ─────────────────────────────────────────────────────────────────
+    if gen_result is None:
+        st.info("Click **Generate** to produce the complete timetable automatically.\n\n"
+                "The engine will run all stages, apply backtracking, and—if needed—"
+                "automatically reduce over-constrained subjects by 1 period to resolve "
+                "deadlocks.")
+
+        if st.button("⚡ Generate Timetable", type="primary",
+                     key="gen_run_btn", use_container_width=True):
+            log.info("page_generate: starting full generation")
+            progress_placeholder = st.empty()
+            progress_log = []
+
+            def _progress(msg):
+                # _gen_prog stores (msg, pct) tuples — normalise to str
+                if isinstance(msg, tuple):
+                    msg = msg[0]
+                msg = str(msg)
+                progress_log.append(msg)
+                if msg.strip():
+                    lines = [m for m in progress_log[-6:] if m.strip()]
+                    progress_placeholder.info("⏳  " + "\n\n".join(lines))
+
+            with st.spinner("🚀 Generating timetable — please wait…"):
+                try:
+                    result = eng.run_full_generation(progress_cb=_progress)
+                    st.session_state["gen_result"] = result
+                    log.info("page_generate: done ok=%s remaining=%s",
+                             result["ok"], result["remaining"])
+                    if result["ok"]:
+                        _notify("✅ Timetable generated — all periods placed!", "success")
+                    else:
+                        _notify(
+                            f"⚠ Timetable generated with {result['remaining']} "
+                            f"period(s) unplaced. See details below.", "warning")
+                except Exception as ex:
+                    log.error("page_generate: %s\n%s", ex, traceback.format_exc())
+                    _notify(f"Generation error: {ex}", "error")
+
+            progress_placeholder.empty()
+            st.rerun()
+        return   # don't render result section yet
+
+    # ── RESULT ──────────────────────────────────────────────────────────────
+    remaining   = gen_result.get("remaining", 0)
+    overloaded  = gen_result.get("overloaded", [])
+    blocked     = gen_result.get("blocked_only", [])
+    reductions  = gen_result.get("period_reductions", [])
+    prog_log    = gen_result.get("progress_log", [])
+    wdays_r     = gen_result.get("wdays", "?")
+    ppd_r       = gen_result.get("ppd", "?")
+    total_slots = gen_result.get("total_slots", "?")
+
+    if remaining == 0:
+        st.success("✅ **Timetable is 100% complete — all periods placed!**")
+    else:
+        st.error(f"⚠  **{remaining} period(s) could not be placed.**  "
+                 f"The timetable is as complete as possible given the constraints.")
+
+    # Period reductions report
+    if reductions:
+        with st.expander(f"📉 Period Reductions Applied ({len(reductions)})",
+                         expanded=True):
+            st.caption(
+                "The engine automatically reduced these subjects by 1 period/week "
+                "to break deadlocks. You may want to review these in Step 2.")
+            for r in reductions:
+                st.warning(
+                    f"**{r['subject']}** in **{r['class']}** "
+                    f"(teacher: {r['teacher']})  —  "
+                    f"{r['from_periods']} → {r['to_periods']} periods/week")
+
+    # Blocked / overloaded teachers
+    if overloaded:
+        st.markdown("#### ❌ Overloaded Teachers")
+        st.caption(f"Grid capacity: {wdays_r} × {ppd_r} = {total_slots} slots")
+        for tname, assigned, cap, excess, unp in overloaded:
+            st.container(border=True)
+            col1, col2 = st.columns([2, 3])
+            with col1: st.markdown(f"**❌ {tname}**")
+            with col2:
+                st.markdown(f"Assigned: **{assigned}** | Capacity: **{cap}** "
+                            f"| Excess: **+{excess}** | Unplaced: **{unp}**")
+
+    if blocked:
+        st.markdown("#### ⚠ Blocked Teachers *(capacity OK, but all slots clash)*")
+        for tname, assigned, cap, unp in blocked:
+            with st.container(border=True):
+                col1, col2 = st.columns([2, 3])
+                with col1: st.markdown(f"**⚠ {tname}**")
+                with col2:
+                    st.markdown(f"Assigned: **{assigned} / {cap}** | Unplaced: **{unp}**")
+
+    # Action buttons
+    st.divider()
+    col_view, col_rerun = st.columns(2)
+    with col_view:
+        if st.button("📊 View Final Timetable →", type="primary",
+                     use_container_width=True, key="gen_view_btn"):
+            _nav("final_timetable")
+    with col_rerun:
+        if st.button("🔄 Re-run Generation", use_container_width=True,
+                     key="gen_rerun_btn"):
+            st.session_state["gen_result"] = None
+            st.rerun()
+
+    # Progress log expander
+    if prog_log:
+        with st.expander("📋 Generation Log", expanded=False):
+            # Normalise: _gen_prog stores (msg, pct) tuples; keep only the text
+            log_lines = [
+                (m[0] if isinstance(m, tuple) else str(m))
+                for m in prog_log
+            ]
+            st.code("\n".join(log_lines), language="")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  STEP 4  (manual mode — kept for power users)
 # ═════════════════════════════════════════════════════════════════════════════
 def page_step4():
     log.info("page_step4: render stage=%d", st.session_state.get("s4_stage",0))
@@ -2170,18 +2429,35 @@ def page_final_timetable():
     log.info("page_final_timetable: render")
     _header("📊 Final Timetable","View and export the complete timetable.")
     _show_notifications()
-    if st.button("← Back to Stage 2"): _nav("stage2_page")
+
+    # Back button
+    if st.button("← Back to Generate"):
+        _nav("generate")
+
+    # Period reduction notice
+    gen_result = st.session_state.get("gen_result") or {}
+    reductions = gen_result.get("period_reductions", [])
+    if reductions:
+        with st.expander(f"📉 {len(reductions)} period reduction(s) were applied to "
+                         f"resolve deadlocks — click to review", expanded=False):
+            for r in reductions:
+                st.warning(
+                    f"**{r['subject']}** in **{r['class']}** "
+                    f"(teacher: {r['teacher']})  →  "
+                    f"{r['from_periods']} → {r['to_periods']} periods/week")
     tt = eng._timetable
     if not tt:
         st.error("No timetable generated."); log.warning("page_final_timetable: no timetable"); return
     with st.container(border=True):
         st.markdown("**📥 Export to Excel**")
-        c1,c2,c3,c4,c5 = st.columns(5)
-        with c1: _excel_download("class",    "📥 Classwise")
-        with c2: _excel_download("teacher",  "📥 Teacherwise")
-        with c3: _excel_download("ct_list",  "📥 CT List")
-        with c4: _excel_download("workload", "📥 Workload")
-        with c5: _excel_download("one_sheet","📥 One-Sheet")
+        c1,c2,c3 = st.columns(3)
+        with c1: _excel_download("class",             "📥 Class Timetables")
+        with c2: _excel_download("consolidated_class","📥 Consolidated Class View")
+        with c3: _excel_download("teacher",           "📥 Teacher Timetables")
+        c4,c5,c6 = st.columns(3)
+        with c4: _excel_download("ct_list",  "📥 CT List")
+        with c5: _excel_download("workload", "📥 Workload")
+        with c6: _excel_download("one_sheet","📥 One-Sheet")
     st.divider()
     tc, tt2, ts = st.tabs(["🏫 Classwise","👨‍🏫 Teacherwise","📋 Summary"])
     with tc:  _render_class_view(tt)
@@ -2232,11 +2508,33 @@ def _render_teacher_view(tt, key_prefix="tch"):
             for p in range(ppd):
                 cell = g[d][p]
                 if not cell: continue
-                for tname, sname in [(cell.get("teacher",""), cell.get("subject","")),
-                                     (cell.get("par_teach",""), cell.get("par_subj",""))]:
-                    if not tname or tname in ("—","?"): continue
-                    tg.setdefault(tname, [[None]*ppd for _ in range(len(days))])
-                    tg[tname][d][p] = {"class":cn,"subject":sname,"is_ct":cell.get("is_ct",False)}
+                etype = cell.get("type", "normal")
+                cc    = cell.get("combined_classes", [])
+                is_combined = bool(cc) and etype in ("combined", "combined_parallel")
+
+                # Primary teacher: for combined groups only write once (when cn==cc[0])
+                tname = cell.get("teacher", "")
+                sname = cell.get("subject", "")
+                if tname and tname not in ("—", "?"):
+                    if is_combined:
+                        # Only write once per combined group slot
+                        if not cc or cn == cc[0]:
+                            cls_label = "+".join(cc)
+                            tg.setdefault(tname, [[None]*ppd for _ in range(len(days))])
+                            tg[tname][d][p] = {"class": cls_label, "subject": sname,
+                                               "is_ct": cell.get("is_ct", False)}
+                    else:
+                        tg.setdefault(tname, [[None]*ppd for _ in range(len(days))])
+                        tg[tname][d][p] = {"class": cn, "subject": sname,
+                                           "is_ct": cell.get("is_ct", False)}
+
+                # Parallel teacher (always per-class)
+                pt = cell.get("par_teach", "")
+                ps = cell.get("par_subj", "")
+                if pt and pt not in ("—", "?"):
+                    tg.setdefault(pt, [[None]*ppd for _ in range(len(days))])
+                    tg[pt][d][p] = {"class": cn, "subject": ps, "is_ct": False}
+
     tlist = sorted(tg.keys())
     if not tlist: st.info("No teacher data."); return
     sel_t = st.selectbox("Select Teacher", tlist, key=f"{key_prefix}_sel")
@@ -2300,18 +2598,45 @@ with st.sidebar:
     st.markdown("## 🗓 Timetable Generator")
     st.caption("V4.1 — Streamlit Edition")
     st.divider()
-    cur = st.session_state.page
-    for pid, plabel in PAGE_LABELS.items():
-        active = (pid == cur)
-        if st.button(("▶ " if active else "   ") + plabel,
-                     key=f"nav_{pid}", use_container_width=True, disabled=active):
+
+    cur     = st.session_state.page
+    s1v     = st.session_state.get("s1_validated", False)
+    s2v     = st.session_state.get("s2_validated", False)
+    s3v     = st.session_state.get("s3_validated", False)
+    gen_done = st.session_state.get("gen_result") is not None
+
+    # Progress indicator
+    n_done = sum([s1v, s2v, s3v, gen_done])
+    st.progress(n_done / 4, text=f"{n_done} of 4 steps complete")
+    st.divider()
+
+    steps = [
+        ("step1",           "1️⃣  Basic Config",      True),
+        ("step2",           "2️⃣  Class Assignments", s1v),
+        ("step3",           "3️⃣  Teacher Settings",  s2v),
+        ("generate",        "4️⃣  Generate",          s3v),
+        ("final_timetable", "🏁  Final Timetable",    gen_done),
+    ]
+
+    for pid, plabel, unlocked in steps:
+        active   = (pid == cur)
+        locked   = not unlocked and not active
+        done_icon = "✅ " if unlocked and not active and pid != "final_timetable" else ""
+        lock_icon = "🔒 " if locked else ""
+        arrow     = "▶ " if active else ""
+        label     = arrow + done_icon + lock_icon + plabel
+        if st.button(label, key=f"nav_{pid}",
+                     use_container_width=True,
+                     disabled=active or locked):
             _nav(pid)
+
     st.divider()
     if eng.configuration:
         cfg = eng.configuration
         st.caption(f"**Config:** {cfg.get('working_days','?')}d × {cfg.get('periods_per_day','?')}p")
         st.caption(f"**Teachers:** {len(cfg.get('teacher_names',[]))}")
         st.caption(f"**Classes:** {sum(cfg.get('classes',{}).values())}")
+
     st.divider()
     with st.expander("🪵 Debug Log", expanded=False):
         st.caption("Shows last 200 log lines. Format: [LEVEL] file:func:line — msg")
@@ -2328,10 +2653,7 @@ PAGES = {
     "step1":           page_step1,
     "step2":           page_step2,
     "step3":           page_step3,
-    "step4":           page_step4,
-    "task_analysis":   page_task_analysis,
-    "task_analysis2":  page_task_analysis2,
-    "stage2_page":     page_stage2,
+    "generate":        page_generate,
     "final_timetable": page_final_timetable,
 }
 
