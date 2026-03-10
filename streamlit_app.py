@@ -319,7 +319,7 @@ def page_step1():
         for idx, cls in enumerate(range(6, 13)):
             with cols[idx]:
                 cur = st.session_state.s1_sections.get(cls, 4)
-                val = st.number_input(f"Class {cls}", 1, 10, cur, key=f"ni_cls_{cls}")
+                val = st.number_input(f"Class {cls}", 0, 50, cur, key=f"ni_cls_{cls}")
                 st.session_state.s1_sections[cls] = val
 
     # ── Navigation ────────────────────────────────────────────────────────────
