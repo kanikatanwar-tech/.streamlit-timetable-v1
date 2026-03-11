@@ -17,6 +17,10 @@ from datetime import datetime
 class TimetableEngine:
     """Holds all application state and scheduling logic."""
 
+    # Bump this string whenever the class interface changes.
+    # streamlit_app.py compares against this to detect stale pickled instances.
+    ENGINE_VERSION = "4.1"
+
     def __init__(self):
         self.configuration        = {}
         self.class_config_data    = {}

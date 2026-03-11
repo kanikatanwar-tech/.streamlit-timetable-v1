@@ -56,32 +56,44 @@ st.set_page_config(page_title="Timetable Generator", page_icon="📅",
 # ─────────────────────────────────────────────────────────────────────────────
 #  Session-state bootstrap
 # ─────────────────────────────────────────────────────────────────────────────
-_REQUIRED_ENGINE_METHODS = [
-    "run_full_generation",
-    "run_stage1",
-    "run_stage3",
-    "get_excel_bytes",
-    "validate_step3",
-]
+
+# The version string must match TimetableEngine.ENGINE_VERSION in engine.py.
+# This is used to detect pickled engine instances from old deployments.
+_ENGINE_VERSION = "4.1"
+
 
 def _engine_is_stale(obj) -> bool:
-    """Return True if obj is not a current TimetableEngine (wrong class or missing methods).
+    """Return True if obj is missing, from an old class, or lacks required methods.
 
-    On Streamlit Cloud, session state is persisted across server restarts /
-    hot-reloads via pickle.  A pickled TimetableEngine created from an *older*
-    engine.py will lack any methods added since that pickle was made.  This
-    guard detects such stale instances so _init_state() can replace them with a
-    fresh one without wiping the rest of session state.
+    Deliberately avoids isinstance() because on Streamlit Cloud a module reload
+    can produce a new class object, making isinstance() return False for valid
+    engines from the same session.  Comparing ENGINE_VERSION strings is immune
+    to this problem.
     """
-    if not isinstance(obj, TimetableEngine):
+    if obj is None:
         return True
-    return any(not hasattr(obj, m) for m in _REQUIRED_ENGINE_METHODS)
+    # Version mismatch = engine is from an older deployment
+    if getattr(obj, "ENGINE_VERSION", None) != _ENGINE_VERSION:
+        return True
+    # Belt-and-suspenders: critical runtime method must exist
+    if not callable(getattr(obj, "run_full_generation", None)):
+        return True
+    return False
+
+
+def _get_eng() -> TimetableEngine:
+    """Always return the live engine from session state.
+
+    Never use a long-lived module-level reference because Streamlit Cloud can
+    occasionally swap the session-state engine (e.g. stale-engine replacement)
+    AFTER a module-level alias was last set.
+    """
+    return st.session_state["engine"]
 
 
 def _init_state():
     defaults = {
         "page":              "step1",
-        "engine":            TimetableEngine(),
         # Step-1 — widget keys ARE the canonical values (no shadow copies)
         "ni_ppd":            7,
         "ni_wdays":          6,
@@ -128,14 +140,16 @@ def _init_state():
         if k not in st.session_state:
             st.session_state[k] = v
 
-    # ── Stale-engine guard ────────────────────────────────────────────────────
-    # Replace a pickled engine that is missing methods added in a newer engine.py.
-    # This happens on Streamlit Cloud when session state survives a redeployment.
-    # IMPORTANT: also reset page + validation flags so the user is not dropped
-    # into step2/3/4 with a completely empty engine (which causes KeyErrors on
-    # cfg["periods_per_day"] and similar mandatory keys).
-    if _engine_is_stale(st.session_state.get("engine")):
-        log.warning("_init_state: stale/missing engine detected — replacing with fresh instance")
+    # ── Engine bootstrap / stale-instance guard ───────────────────────────────
+    # Must run AFTER the defaults loop so "engine" key exists even on first run.
+    if "engine" not in st.session_state:
+        st.session_state["engine"] = TimetableEngine()
+        log.info("_init_state: fresh engine created")
+    elif _engine_is_stale(st.session_state["engine"]):
+        # Engine from an old deployment was pickled into session state.
+        # Wipe it and start over.  Also reset page + validated flags so the
+        # user lands on Step 1 (not on Step 2/3/4 with an empty engine).
+        log.warning("_init_state: stale engine detected — resetting")
         st.session_state["engine"]       = TimetableEngine()
         st.session_state["page"]         = "step1"
         st.session_state["s1_validated"] = False
@@ -143,22 +157,11 @@ def _init_state():
         st.session_state["s3_validated"] = False
         st.session_state["gen_result"]   = None
 
-    log.debug("_init_state: session state ready")
+    log.debug("_init_state: done  page=%s  s1v=%s",
+              st.session_state.get("page"), st.session_state.get("s1_validated"))
+
 
 _init_state()
-
-def _get_eng() -> TimetableEngine:
-    """Always fetch the engine from session state (never use a module-level alias).
-
-    A module-level ``eng = st.session_state.engine`` is assigned once when the
-    script loads.  On Streamlit Cloud the stale-engine guard above may replace
-    ``st.session_state["engine"]`` with a fresh object *after* that assignment,
-    so the module-level name would still point at the old instance.  Using this
-    helper everywhere ensures we always get the live object.
-    """
-    return st.session_state.engine
-
-eng: TimetableEngine = _get_eng()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -197,11 +200,11 @@ def _already_processed(key: str, data: bytes) -> bool:
     return False
 
 def _all_classes():
-    cfg = eng.configuration
+    cfg = _get_eng().configuration
     return [
         f"{cls}{chr(65+si)}"
         for cls in range(6, 13)
-        for si in range(cfg.get("classes", {}).get(cls, 0))
+        for si in range(int(cfg.get("classes", {}).get(cls, 0)))
     ]
 
 def _json_download(data: dict, label: str, filename: str):
@@ -212,7 +215,7 @@ def _json_download(data: dict, label: str, filename: str):
 def _excel_download(mode: str, label: str):
     log.info("_excel_download: mode=%s", mode)
     try:
-        xbytes = eng.get_excel_bytes(mode)
+        xbytes = _get_eng().get_excel_bytes(mode)
         fname  = f"{mode}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
         st.download_button(label=label, data=xbytes, file_name=fname,
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -593,8 +596,6 @@ def _load_teacher_bytes(raw: bytes, fname: str):
 
 def _step1_save_and_continue():
     log.info("_step1_save_and_continue: called")
-    # FIX: read directly from widget-key state (ni_ppd etc.) — these are the
-    # ACTUAL current values shown in the widgets, not stale shadow copies.
     ppd   = int(st.session_state.get("ni_ppd",   7))
     wdays = int(st.session_state.get("ni_wdays", 6))
     fhalf = int(st.session_state.get("ni_fhalf", 4))
@@ -619,8 +620,12 @@ def _step1_save_and_continue():
         st.rerun()
         return
 
-    sections = dict(st.session_state.s1_sections)
-    eng.configuration = {
+    # Always use int values for section counts — number_input can return float
+    sections = {cls: int(v) for cls, v in st.session_state.s1_sections.items()}
+
+    # Write configuration directly into session-state engine
+    engine = _get_eng()
+    engine.configuration = {
         "periods_per_day":    ppd,
         "working_days":       wdays,
         "periods_first_half": fhalf,
@@ -635,13 +640,13 @@ def _step1_save_and_continue():
     for cls in range(6, 13):
         for si in range(sections.get(cls, 0)):
             cn = f"{cls}{chr(65+si)}"
-            if cn not in eng.class_config_data:
-                eng.class_config_data[cn] = {
+            if cn not in engine.class_config_data:
+                engine.class_config_data[cn] = {
                     "subjects": [], "teacher": "",
                     "teacher_period": 1, "editing_index": None,
                 }
     log.info("_step1_save_and_continue: %d classes ready → step2",
-             len(eng.class_config_data))
+             len(engine.class_config_data))
     st.session_state["s1_validated"] = True
     st.session_state["s2_validated"] = False
     st.session_state["s3_validated"] = False
@@ -652,13 +657,20 @@ def _step1_save_and_continue():
 #  STEP 2
 # ═════════════════════════════════════════════════════════════════════════════
 def page_step2():
-    log.info("page_step2: render (%d classes)", len(_all_classes()))
+    # Always fetch the live engine — never rely on a possibly-stale module alias
+    eng = _get_eng()
 
-    # Guard: engine config must exist — redirect to Step 1 if empty
-    if not _get_eng().configuration:
-        st.warning("\u26a0 Configuration lost (session reset). Please complete Step 1 first.")
-        _nav("step1")
+    # Guard: if Step 1 hasn't been completed the engine config will be empty.
+    # Show a clear message and a button — DO NOT auto-redirect (_nav inside a
+    # guard would unconditionally loop the user back to step1 on every rerun).
+    if not eng.configuration:
+        st.warning("⚠ Step 1 not yet completed — basic configuration is missing.")
+        st.info("Please complete Step 1 (Basic Config) before continuing.")
+        if st.button("← Go to Step 1", type="primary", key="s2_guard_back"):
+            _nav("step1")
         return
+
+    log.info("page_step2: render (%d classes)", len(_all_classes()))
 
     # Show validation error popup if triggered
     if st.session_state.get("_s2_val_errors"):
@@ -689,7 +701,7 @@ def page_step2():
                     cn: {"teacher": cd.get("teacher",""),
                          "teacher_period": cd.get("teacher_period",1),
                          "subjects": cd.get("subjects",[])}
-                    for cn, cd in eng.class_config_data.items()
+                    for cn, cd in _get_eng().class_config_data.items()
                 }
                 st.session_state["_s2_dl_data"] = {
                     "assignments": payload,
@@ -830,6 +842,7 @@ def page_step2():
 
 def _load_step2_assignments(raw: bytes):
     """Load assignments JSON — shows a modal dialog for wrong file uploads."""
+    eng = _get_eng()
     log.info("_load_step2_assignments: %d bytes", len(raw))
     try:
         d = json.loads(raw.decode("utf-8"))
@@ -895,8 +908,9 @@ def _s2_init_form(cn, suffix, prefill: dict):
     init_key = f"sf_init_{cn}_{suffix}"
     if st.session_state.get(init_key):
         return
-    ppd   = eng.configuration["periods_per_day"]
-    wdays = eng.configuration["working_days"]
+    _cfg  = _get_eng().configuration
+    ppd   = _cfg["periods_per_day"]
+    wdays = _cfg["working_days"]
     st.session_state[f"sf_name_{cn}_{suffix}"]   = prefill.get("name", "")
     st.session_state[f"sf_teach_{cn}_{suffix}"]  = prefill.get("teacher", "")
     st.session_state[f"sf_per_{cn}_{suffix}"]    = int(prefill.get("periods", 1))
@@ -911,6 +925,7 @@ def _s2_init_form(cn, suffix, prefill: dict):
 
 
 def _class_config_tab(cn, teachers, ppd, wdays, required, day_names):
+    eng = _get_eng()
     log.debug("_class_config_tab: %s", cn)
     cd = eng.class_config_data.setdefault(cn, {
         "subjects": [], "teacher": "", "teacher_period": 1, "editing_index": None})
@@ -1081,6 +1096,7 @@ def _step2_validate_and_continue():
                pinned to overlapping period slots in the same class on the same day).
     """
     import math
+    eng = _get_eng()
     log.info("_step2_validate_and_continue: running")
     cfg       = eng.configuration
     ppd       = cfg["periods_per_day"]
@@ -1420,14 +1436,16 @@ def _display_s2_validation(vr):
 #  STEP 3
 # ═════════════════════════════════════════════════════════════════════════════
 def page_step3():
-    log.info("page_step3: render")
+    eng = _get_eng()
 
-    # Guard: engine config must exist — redirect to Step 1 if empty
-    if not _get_eng().configuration:
-        st.warning("⚠ Configuration lost (session reset). Please complete Step 1 first.")
-        _nav("step1")
+    if not eng.configuration:
+        st.warning("⚠ Step 1 not yet completed — basic configuration is missing.")
+        st.info("Please complete Step 1 (Basic Config) before continuing.")
+        if st.button("← Go to Step 1", type="primary", key="s3_guard_back"):
+            _nav("step1")
         return
 
+    log.info("page_step3: render")
     _header("⚙ Step 3: Teacher Settings",
             "Review workload, define combined classes and mark teacher unavailability.")
     _show_notifications()
@@ -1456,9 +1474,9 @@ def page_step3():
                 log.info("page_step3: preparing download")
                 st.session_state["_s3_dl_data"] = {
                     "step3_data": {t:{"skipped":v.get("skipped",False),"combines":v.get("combines",[])}
-                                   for t,v in eng.step3_data.items()},
+                                   for t,v in _get_eng().step3_data.items()},
                     "step3_unavailability": {t:{"days":list(v["days"]),"periods":list(v["periods"])}
-                                             for t,v in eng.step3_unavailability.items()},
+                                             for t,v in _get_eng().step3_unavailability.items()},
                     "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "step":3,
                 }
             if "_s3_dl_data" in st.session_state:
@@ -1571,14 +1589,15 @@ def _load_step3_config(raw: bytes):
         return
 
     try:
-        eng.step3_data = d.get("step3_data", {})
-        eng.step3_unavailability = {
+        _e3 = _get_eng()
+        _e3.step3_data = d.get("step3_data", {})
+        _e3.step3_unavailability = {
             t: {"days": v.get("days", []), "periods": v.get("periods", [])}
             for t, v in d.get("step3_unavailability", {}).items()
         }
         _notify("✓ Step 3 config loaded.", "success")
         log.info("_load_step3_config: %d teachers, %d unavail",
-                 len(eng.step3_data), len(eng.step3_unavailability))
+                 len(_e3.step3_data), len(_e3.step3_unavailability))
         st.rerun()
     except Exception as ex:
         log.error("_load_step3_config: %s\n%s", ex, traceback.format_exc())
@@ -1586,13 +1605,8 @@ def _load_step3_config(raw: bytes):
 
 
 def _render_workload(teachers, wdays, ppd):
-    """Render teacher workload with Edit/Combine and Skip buttons per teacher.
-
-    Mirrors the original Step 3 left-panel exactly:
-      • Overloaded teachers listed first (red cards)
-      • All teachers have Edit/Combine button — not just overloaded ones
-      • Clicking Edit/Combine opens the full assignment+combine detail panel below
-    """
+    """Render teacher workload with Edit/Combine and Skip buttons per teacher."""
+    eng = _get_eng()
     log.debug("_render_workload: %d teachers", len(teachers))
 
     max_allowed = (ppd - 2) * wdays
@@ -1704,6 +1718,7 @@ def _render_workload(teachers, wdays, ppd):
 
 def _render_teacher_combine_detail(teacher):
     """Full assignment + combine panel for a selected teacher."""
+    eng = _get_eng()
     # ── Combine error: show as modal dialog (not top-of-page) ─────────────────
     combine_err = st.session_state.pop("_s3_combine_err", None)
     if combine_err:
@@ -1857,11 +1872,8 @@ def _render_teacher_combine_detail(teacher):
 
 
 def _render_combine_tab(teachers, all_cn):
-    """Shows a summary of all existing combines across all teachers.
-
-    The primary combine interface is in the Teacher Workload tab (Edit/Combine button).
-    This tab shows a read-only overview and quick-remove capability.
-    """
+    """Shows a summary of all existing combines across all teachers."""
+    eng = _get_eng()
     log.debug("_render_combine_tab")
     st.info("💡 To **add** combines, go to the **Teacher Workload** tab and click "
             "**Edit / Combine** next to any teacher.")
@@ -1899,6 +1911,7 @@ def _render_combine_tab(teachers, all_cn):
 
 
 def _render_unavailability_tab(teachers, day_names, ppd):
+    eng = _get_eng()
     log.debug("_render_unavailability_tab")
     unavail = eng.step3_unavailability
     with st.container(border=True):
@@ -1952,14 +1965,16 @@ def _render_unavailability_tab(teachers, day_names, ppd):
 #  GENERATE PAGE  (Step 3 → Final Timetable, fully automatic)
 # ═════════════════════════════════════════════════════════════════════════════
 def page_generate():
-    log.info("page_generate: render")
+    eng = _get_eng()
 
-    # Guard: engine config must exist — redirect to Step 1 if empty
-    if not _get_eng().configuration:
-        st.warning("\u26a0 Configuration lost (session reset). Please complete Step 1 first.")
-        _nav("step1")
+    if not eng.configuration:
+        st.warning("⚠ Step 1 not yet completed — basic configuration is missing.")
+        st.info("Please complete Step 1 (Basic Config) before continuing.")
+        if st.button("← Go to Step 1", type="primary", key="gen_guard_back"):
+            _nav("step1")
         return
 
+    log.info("page_generate: render")
     cfg   = eng.configuration
     ppd   = cfg.get("periods_per_day", "?")
     wdays = cfg.get("working_days", "?")
@@ -2095,6 +2110,7 @@ def page_generate():
 #  STEP 4  (manual mode — kept for power users)
 # ═════════════════════════════════════════════════════════════════════════════
 def page_step4():
+    eng = _get_eng()
     log.info("page_step4: render stage=%d", st.session_state.get("s4_stage",0))
     cfg   = eng.configuration
     ppd   = cfg["periods_per_day"]
@@ -2162,6 +2178,7 @@ def page_step4():
 #  TASK ANALYSIS
 # ═════════════════════════════════════════════════════════════════════════════
 def page_task_analysis():
+    eng = _get_eng()
     log.info("page_task_analysis: render")
     _header("📋 Task Analysis","Review groups before Stage 2. Allocate period slots.")
     _show_notifications()
@@ -2213,6 +2230,7 @@ def page_task_analysis():
 
 
 def _render_ta_table(all_rows, group_slots, allocation):
+    eng = _get_eng()
     log.debug("_render_ta_table: %d rows", len(all_rows) if all_rows else 0)
     if not all_rows:
         st.info("No parallel/combined/consecutive groups found."); return
@@ -2267,6 +2285,7 @@ def _render_ta_table(all_rows, group_slots, allocation):
 #  TASK ANALYSIS 2
 # ═════════════════════════════════════════════════════════════════════════════
 def page_task_analysis2():
+    eng = _get_eng()
     log.info("page_task_analysis2: render")
     _header("📋 Task Analysis — Stage 2","Allocate remaining slots before Stage 3.")
     _show_notifications()
@@ -2398,6 +2417,7 @@ def _render_force_fill_summary(ff_result):
 
 
 def page_stage2():
+    eng = _get_eng()
     log.info("page_stage2: render")
     _header("⚙ Stage 2 — Fill Remaining Periods",
             "Stage 3 of engine: consecutive pairs, daily subjects, fillers and repair.")
@@ -2496,6 +2516,14 @@ def page_stage2():
 #  FINAL TIMETABLE
 # ═════════════════════════════════════════════════════════════════════════════
 def page_final_timetable():
+    eng = _get_eng()
+
+    if not eng.configuration:
+        st.warning("⚠ Step 1 not yet completed — basic configuration is missing.")
+        if st.button("← Go to Step 1", type="primary", key="ft_guard_back"):
+            _nav("step1")
+        return
+
     log.info("page_final_timetable: render")
     _header("📊 Final Timetable","View and export the complete timetable.")
     _show_notifications()
@@ -2701,8 +2729,9 @@ with st.sidebar:
             _nav(pid)
 
     st.divider()
-    if eng.configuration:
-        cfg = eng.configuration
+    _eng_sb = _get_eng()
+    if _eng_sb.configuration:
+        cfg = _eng_sb.configuration
         st.caption(f"**Config:** {cfg.get('working_days','?')}d × {cfg.get('periods_per_day','?')}p")
         st.caption(f"**Teachers:** {len(cfg.get('teacher_names',[]))}")
         st.caption(f"**Classes:** {sum(cfg.get('classes',{}).values())}")
