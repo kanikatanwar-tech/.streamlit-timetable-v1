@@ -131,9 +131,17 @@ def _init_state():
     # ── Stale-engine guard ────────────────────────────────────────────────────
     # Replace a pickled engine that is missing methods added in a newer engine.py.
     # This happens on Streamlit Cloud when session state survives a redeployment.
+    # IMPORTANT: also reset page + validation flags so the user is not dropped
+    # into step2/3/4 with a completely empty engine (which causes KeyErrors on
+    # cfg["periods_per_day"] and similar mandatory keys).
     if _engine_is_stale(st.session_state.get("engine")):
         log.warning("_init_state: stale/missing engine detected — replacing with fresh instance")
-        st.session_state["engine"] = TimetableEngine()
+        st.session_state["engine"]       = TimetableEngine()
+        st.session_state["page"]         = "step1"
+        st.session_state["s1_validated"] = False
+        st.session_state["s2_validated"] = False
+        st.session_state["s3_validated"] = False
+        st.session_state["gen_result"]   = None
 
     log.debug("_init_state: session state ready")
 
@@ -645,6 +653,12 @@ def _step1_save_and_continue():
 # ═════════════════════════════════════════════════════════════════════════════
 def page_step2():
     log.info("page_step2: render (%d classes)", len(_all_classes()))
+
+    # Guard: engine config must exist — redirect to Step 1 if empty
+    if not _get_eng().configuration:
+        st.warning("\u26a0 Configuration lost (session reset). Please complete Step 1 first.")
+        _nav("step1")
+        return
 
     # Show validation error popup if triggered
     if st.session_state.get("_s2_val_errors"):
@@ -1407,6 +1421,13 @@ def _display_s2_validation(vr):
 # ═════════════════════════════════════════════════════════════════════════════
 def page_step3():
     log.info("page_step3: render")
+
+    # Guard: engine config must exist — redirect to Step 1 if empty
+    if not _get_eng().configuration:
+        st.warning("⚠ Configuration lost (session reset). Please complete Step 1 first.")
+        _nav("step1")
+        return
+
     _header("⚙ Step 3: Teacher Settings",
             "Review workload, define combined classes and mark teacher unavailability.")
     _show_notifications()
@@ -1932,6 +1953,13 @@ def _render_unavailability_tab(teachers, day_names, ppd):
 # ═════════════════════════════════════════════════════════════════════════════
 def page_generate():
     log.info("page_generate: render")
+
+    # Guard: engine config must exist — redirect to Step 1 if empty
+    if not _get_eng().configuration:
+        st.warning("\u26a0 Configuration lost (session reset). Please complete Step 1 first.")
+        _nav("step1")
+        return
+
     cfg   = eng.configuration
     ppd   = cfg.get("periods_per_day", "?")
     wdays = cfg.get("working_days", "?")
