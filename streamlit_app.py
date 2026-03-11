@@ -56,6 +56,28 @@ st.set_page_config(page_title="Timetable Generator", page_icon="📅",
 # ─────────────────────────────────────────────────────────────────────────────
 #  Session-state bootstrap
 # ─────────────────────────────────────────────────────────────────────────────
+_REQUIRED_ENGINE_METHODS = [
+    "run_full_generation",
+    "run_stage1",
+    "run_stage3",
+    "get_excel_bytes",
+    "validate_step3",
+]
+
+def _engine_is_stale(obj) -> bool:
+    """Return True if obj is not a current TimetableEngine (wrong class or missing methods).
+
+    On Streamlit Cloud, session state is persisted across server restarts /
+    hot-reloads via pickle.  A pickled TimetableEngine created from an *older*
+    engine.py will lack any methods added since that pickle was made.  This
+    guard detects such stale instances so _init_state() can replace them with a
+    fresh one without wiping the rest of session state.
+    """
+    if not isinstance(obj, TimetableEngine):
+        return True
+    return any(not hasattr(obj, m) for m in _REQUIRED_ENGINE_METHODS)
+
+
 def _init_state():
     defaults = {
         "page":              "step1",
@@ -105,10 +127,30 @@ def _init_state():
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
+
+    # ── Stale-engine guard ────────────────────────────────────────────────────
+    # Replace a pickled engine that is missing methods added in a newer engine.py.
+    # This happens on Streamlit Cloud when session state survives a redeployment.
+    if _engine_is_stale(st.session_state.get("engine")):
+        log.warning("_init_state: stale/missing engine detected — replacing with fresh instance")
+        st.session_state["engine"] = TimetableEngine()
+
     log.debug("_init_state: session state ready")
 
 _init_state()
-eng: TimetableEngine = st.session_state.engine
+
+def _get_eng() -> TimetableEngine:
+    """Always fetch the engine from session state (never use a module-level alias).
+
+    A module-level ``eng = st.session_state.engine`` is assigned once when the
+    script loads.  On Streamlit Cloud the stale-engine guard above may replace
+    ``st.session_state["engine"]`` with a fresh object *after* that assignment,
+    so the module-level name would still point at the old instance.  Using this
+    helper everywhere ensures we always get the live object.
+    """
+    return st.session_state.engine
+
+eng: TimetableEngine = _get_eng()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
