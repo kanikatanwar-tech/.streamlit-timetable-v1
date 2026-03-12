@@ -471,6 +471,74 @@ class TimetableEngine:
 
         return group_slots, group_allocation, all_rows
 
+
+    def _build_task_analysis_rows(self):
+        """
+        Read-only preview helper: builds all_rows WITHOUT allocating slots or
+        modifying the grid.  Safe to call on every page render.
+        """
+        s3  = getattr(self, 'step3_data', {})
+        cfg = self.configuration
+        all_classes = []
+        for cls in range(6, 13):
+            for si in range(cfg['classes'].get(cls, 0)):
+                all_classes.append("{}{}".format(cls, chr(65 + si)))
+
+        def _find_parallel(cn, subject_name):
+            cd_subjects = self.class_config_data.get(cn, {}).get('subjects', [])
+            for s in cd_subjects:
+                if s['name'] == subject_name and s.get('parallel'):
+                    ps = (s.get('parallel_subject') or '').strip()
+                    pt = (s.get('parallel_teacher') or '').strip()
+                    return (ps or '?', pt or '—')
+                if (s.get('parallel')
+                        and (s.get('parallel_subject') or '').strip() == subject_name
+                        and s['name'] != subject_name):
+                    return (s['name'], (s.get('teacher') or '').strip() or '—')
+            return ('—', '—')
+
+        all_rows = []; group_no = 0; covered = set()
+        for teacher, s3d in sorted(s3.items()):
+            for cb in s3d.get('combines', []):
+                classes  = cb.get('classes', []); subjects = cb.get('subjects', [])
+                if not classes: continue
+                group_no += 1
+                for j, cn in enumerate(classes):
+                    tsub = (subjects[j] if j < len(subjects) else (subjects[0] if subjects else '?'))
+                    par_subj, par_teacher = _find_parallel(cn, tsub)
+                    all_rows.append({'group': group_no, 'class': cn, 'subject': tsub,
+                                     'teacher': teacher, 'par_subj': par_subj,
+                                     'par_teacher': par_teacher, 'section': 'A'})
+                    covered.add((cn, tsub))
+                    if par_subj not in ('—', '?'): covered.add((cn, par_subj))
+        seen_pairs = set()
+        for cn in all_classes:
+            for s in self.class_config_data.get(cn, {}).get('subjects', []):
+                if not s.get('parallel'): continue
+                subj_name = s['name']; subj_teach = (s.get('teacher') or '').strip()
+                par_subj  = (s.get('parallel_subject') or '').strip()
+                par_teacher = (s.get('parallel_teacher') or '').strip()
+                if not par_subj: continue
+                if (cn, subj_name) in covered or (cn, par_subj) in covered: continue
+                pair_key = frozenset([(cn, subj_name), (cn, par_subj)])
+                if pair_key in seen_pairs: continue
+                seen_pairs.add(pair_key); group_no += 1
+                all_rows.append({'group': group_no, 'class': cn, 'subject': subj_name,
+                                 'teacher': subj_teach, 'par_subj': par_subj or '?',
+                                 'par_teacher': par_teacher or '—', 'section': 'B'})
+        seen_consec = set()
+        for cn in all_classes:
+            for s in self.class_config_data.get(cn, {}).get('subjects', []):
+                if s.get('consecutive', 'No') != 'Yes': continue
+                subj_name = s['name']; key = (cn, subj_name)
+                if key in seen_consec: continue
+                seen_consec.add(key); group_no += 1
+                all_rows.append({'group': group_no, 'class': cn, 'subject': subj_name,
+                                 'teacher': (s.get('teacher') or '').strip(),
+                                 'par_subj': '—', 'par_teacher': '—',
+                                 'section': 'C', 'periods': s.get('periods', '')})
+        return all_rows
+
     def _proceed_to_stage2(self):
         """
         Gate check before entering Stage 2.
@@ -679,6 +747,36 @@ class TimetableEngine:
             phase  = 'main' if is_main(task) else 'filler'
             placed = list(results.get(task['idx'], {}).get('placed', []))
 
+            # Day-spreading: prefer days where this subject appears least.
+            # Pass 1: place at most ceil(n/wdays) per day (capped at 2) to
+            # spread periods uniformly; Pass 2 (fallback): no cap, original loop.
+            n_total = task['periods']
+            nat_max = (n_total + wdays - 1) // wdays
+            max_pd  = min(2, nat_max)
+
+            def _subj_count_today(d_):
+                return max(
+                    (sum(1 for pp in range(ppd)
+                         if grid.get(cn_, [[]])[d_][pp] is not None
+                         and grid[cn_][d_][pp].get('subject') == task['subject'])
+                     for cn_ in task['cn_list'] if cn_ in grid),
+                    default=0)
+
+            # Pass 1: place at most max_pd per day, preferring under-populated days
+            day_order = sorted(range(wdays), key=_subj_count_today)
+            for d in day_order:
+                if task['remaining'] <= 0:
+                    break
+                if _subj_count_today(d) >= max_pd:
+                    continue
+                for p in range(ppd):
+                    if task['remaining'] <= 0:
+                        break
+                    if slot_free(task, d, p):
+                        self._gen_place(task, d, p)
+                        placed.append((d, p))
+
+            # Pass 2 (fallback): original loop if any remain unplaced
             for d in range(wdays):
                 if task['remaining'] <= 0:
                     break
@@ -968,24 +1066,23 @@ class TimetableEngine:
         except Exception as exc:
             _prog(f"   Post-process warning: {exc}")
 
-        # ── 8. Fill any class free slots caused by period reductions ─────
-        if self._period_reductions:
-            _prog("📝 Filling free slots created by period reductions…")
-            try:
-                self._fill_freed_slots()
-                self._timetable = self._gen_snapshot_tt()
-                free_remaining = sum(
-                    1 for cn in self._gen['all_classes']
-                    for d in range(self._gen['wdays'])
-                    for p in range(self._gen['ppd'])
-                    if self._gen['grid'].get(cn, [[]])[d][p] is None
-                )
-                if free_remaining:
-                    _prog(f"   ⚠ {free_remaining} slot(s) still free after fill attempt")
-                else:
-                    _prog("   ✅ All class slots filled — no free periods")
-            except Exception as exc:
-                _prog(f"   Free-slot fill warning: {exc}")
+        # ── 8. Fill ALL class free slots (always run, not only after reductions) ─
+        _prog("📝 Filling any remaining free class slots…")
+        try:
+            self._fill_freed_slots()
+            self._timetable = self._gen_snapshot_tt()
+            free_remaining = sum(
+                1 for cn in self._gen['all_classes']
+                for d in range(self._gen['wdays'])
+                for p in range(self._gen['ppd'])
+                if self._gen['grid'].get(cn, [[]])[d][p] is None
+            )
+            if free_remaining:
+                _prog(f"   ⚠ {free_remaining} slot(s) still free after fill attempt")
+            else:
+                _prog("   ✅ All class slots filled — no free periods")
+        except Exception as exc:
+            _prog(f"   Free-slot fill warning: {exc}")
 
         # ── Build result dict ─────────────────────────────────────────────
         final_remaining  = sum(t['remaining'] for t in self._gen['tasks'])
@@ -1076,7 +1173,7 @@ class TimetableEngine:
                 candidates = []
                 for s in cd_subjects:
                     sn = s.get('name', '').strip()
-                    if (sn, cn) in reduced_keys:
+                    if (cn, sn) in reduced_keys:
                         continue
                     if s.get('periods', 0) <= 1:
                         continue
@@ -1105,7 +1202,7 @@ class TimetableEngine:
                     # (i.e. at least one occurrence will stay placed)
                     for s in cd_subjects:
                         sn = s.get('name', '').strip()
-                        if (sn, cn) in reduced_keys:
+                        if (cn, sn) in reduced_keys:
                             continue
                         if s.get('periods', 0) <= max(1, stuck['remaining']):
                             continue
@@ -1138,24 +1235,31 @@ class TimetableEngine:
 
     def _fill_freed_slots(self):
         """
-        After period reductions, some class slots may be None (free).
-        Rule: a class must NEVER have a free period.
+        Hard Constraint: no class may ever have a free period.
 
-        For each free (None) slot in a class:
-          1. Find every subject already placed on that day for the class
-             (to avoid a double-lesson on the same day for the same subject).
-          2. Among the remaining subjects in class_config_data, find the best
-             candidate to receive +1 period:
-               • Not already taught on that day in that class
-               • Not HC1 / CT subject
-               • current_periods + 1 <= wdays  (won't exceed one-per-day)
-               • Prioritise the subject with the most current placed periods
-                 ("most main" = already appears most frequently)
-          3. Place the subject into the free slot directly in the grid.
-          4. Mark the teacher busy at that slot (update t_busy).
+        For every free (None) slot in every class, find the best subject to
+        place there.  Candidates are evaluated in three passes with progressively
+        relaxed constraints so every slot is filled:
 
-        This preserves all hard constraints because we never double-book a
-        class slot and we check teacher availability before placing.
+          Pass 1 — Strict:
+            • Subject not already on this day in this class
+            • Teacher free at (d, pp)
+            • Placed-count + 1 ≤ wdays  (≤ 1 per day normally)
+            • Prefer Main subjects (periods ≥ wdays) — rank by placed count desc
+
+          Pass 2 — Relax "same-day" rule:
+            Same as Pass 1 but allow subjects already on this day (same subject
+            twice in one day) — still checks teacher availability.
+
+          Pass 3 — Relax teacher-free check:
+            Place the subject with the most placed periods regardless — marks
+            the teacher busy so no double-booking is introduced in the grid
+            meta-data, even if the teacher is technically overloaded that slot.
+            This is a last-resort safety net.
+
+        Parallel subjects: when a subject has a parallel partner, the parallel
+        teacher is also marked busy at the chosen slot so the teacher-wise view
+        remains consistent.
         """
         g      = self._gen
         grid   = g['grid']
@@ -1163,95 +1267,123 @@ class TimetableEngine:
         ppd    = g['ppd']
         tasks  = g['tasks']
 
-        # Build a quick lookup: (cn, subject) -> placed count on each day
-        def _placed_on_day(cn, subj_name, day):
-            return sum(
-                1 for pp in range(ppd)
-                if grid[cn][day][pp] is not None
-                and grid[cn][day][pp].get('subject') == subj_name
-            )
+        t_busy_gen = g.setdefault('t_busy', {})
 
-        # Build placed count per (cn, subject)
         def _placed_total(cn, subj_name):
             return sum(
-                1 for d in range(wdays) for pp in range(ppd)
-                if grid[cn][d][pp] is not None
-                and grid[cn][d][pp].get('subject') == subj_name
+                1 for d2 in range(wdays) for pp2 in range(ppd)
+                if grid[cn][d2][pp2] is not None
+                and grid[cn][d2][pp2].get('subject') == subj_name
             )
 
-        # Teacher-busy helper (re-uses gen state)
-        t_busy_gen = g.get('t_busy', {})
         def _teacher_free(teacher, d, p):
             if not teacher or teacher in ('—', '?', ''):
                 return True
             return (d, p) not in t_busy_gen.get(teacher, set())
 
+        def _is_main(subj_name, cn):
+            """True if subject periods >= wdays (i.e. it appears every day)."""
+            cd_subjs = self.class_config_data.get(cn, {}).get('subjects', [])
+            for s in cd_subjs:
+                if s.get('name', '').strip() == subj_name:
+                    return s.get('periods', 0) >= wdays
+            return False
+
+        def _place_cell(cn, d, pp, sname, teacher, s_data):
+            """Write cell into grid and mark both primary and parallel teacher busy."""
+            par_subj    = (s_data.get('parallel_subject') or '').strip()
+            par_teacher = (s_data.get('parallel_teacher') or '').strip()
+            if not s_data.get('parallel'):
+                par_subj = par_teacher = ''
+            grid[cn][d][pp] = {
+                'type':             'parallel' if par_teacher else 'filler_extra',
+                'subject':          sname,
+                'teacher':          teacher,
+                'par_subj':         par_subj or '—',
+                'par_teach':        par_teacher or '—',
+                'combined_classes': [],
+                'is_ct':            False,
+            }
+            if teacher and teacher not in ('—', '?', ''):
+                t_busy_gen.setdefault(teacher, set()).add((d, pp))
+            if par_teacher and par_teacher not in ('—', '?', ''):
+                t_busy_gen.setdefault(par_teacher, set()).add((d, pp))
+
         for cn in g['all_classes']:
             if cn not in grid:
                 continue
             cd_subjects = self.class_config_data.get(cn, {}).get('subjects', [])
+            if not cd_subjects:
+                continue
 
             for d in range(wdays):
                 for pp in range(ppd):
                     if grid[cn][d][pp] is not None:
                         continue  # already filled
 
-                    # What subjects are already placed today in this class?
-                    today_subjects = set()
-                    for pp2 in range(ppd):
-                        cell = grid[cn][d][pp2]
-                        if cell:
-                            today_subjects.add(cell.get('subject', ''))
-
-                    # Find best subject to place here
-                    candidates = []
-                    for s in cd_subjects:
-                        sname   = s.get('name', '').strip()
-                        teacher = (s.get('teacher') or '').strip()
-                        if not sname or sname in today_subjects:
-                            continue
-                        # Skip CT/HC1 subjects (fixed-period subjects)
-                        # by checking if they already have a task with is_ct=True
-                        task_obj = next(
-                            (t for t in tasks
-                             if cn in t['cn_list'] and t['subject'] == sname),
-                            None)
-                        if task_obj and task_obj.get('is_ct'):
-                            continue
-                        # Period cap: don't allow more than 1 occurrence per day
-                        current = _placed_total(cn, sname)
-                        if current + 1 > wdays:
-                            continue
-                        # Teacher must be free at this slot
-                        if not _teacher_free(teacher, d, pp):
-                            continue
-                        candidates.append((current, sname, teacher, s))
-
-                    if not candidates:
-                        continue  # cannot fill — leave as free (rare edge case)
-
-                    # Pick the subject with the highest current placed count
-                    # (most "main" = most important subject already placed most)
-                    candidates.sort(key=lambda x: -x[0])
-                    _, best_subj, best_teacher, best_s = candidates[0]
-
-                    # Place into grid
-                    par_subj    = (best_s.get('parallel_subject') or '').strip()
-                    par_teacher = (best_s.get('parallel_teacher') or '').strip()
-                    grid[cn][d][pp] = {
-                        'type':             'filler_extra',
-                        'subject':          best_subj,
-                        'teacher':          best_teacher,
-                        'par_subj':         par_subj or '—',
-                        'par_teach':        par_teacher or '—',
-                        'combined_classes': [],
-                        'is_ct':            False,
+                    # Subjects already placed today
+                    today_subjects = {
+                        grid[cn][d][pp2].get('subject', '')
+                        for pp2 in range(ppd)
+                        if grid[cn][d][pp2] is not None
                     }
-                    # Mark teacher busy
-                    if best_teacher and best_teacher not in ('—', '?', ''):
-                        t_busy_gen.setdefault(best_teacher, set()).add((d, pp))
-                    if par_teacher and par_teacher not in ('—', '?', ''):
-                        t_busy_gen.setdefault(par_teacher, set()).add((d, pp))
+
+                    # Build candidate list for each pass
+                    # (current_placed, is_main_flag, sname, teacher, s_data)
+                    def _build_candidates(allow_same_day, allow_teacher_busy):
+                        cands = []
+                        for s in cd_subjects:
+                            sname   = s.get('name', '').strip()
+                            teacher = (s.get('teacher') or '').strip()
+                            if not sname:
+                                continue
+                            if not allow_same_day and sname in today_subjects:
+                                continue
+                            # Never place an HC1 (CT-fixed) subject as filler
+                            task_obj = next(
+                                (t for t in tasks
+                                 if cn in t['cn_list'] and t['subject'] == sname
+                                 and t.get('is_ct')),
+                                None)
+                            if task_obj:
+                                continue
+                            current = _placed_total(cn, sname)
+                            if current + 1 > wdays * 2:   # hard upper cap
+                                continue
+                            if not allow_teacher_busy:
+                                if not _teacher_free(teacher, d, pp):
+                                    continue
+                                # Also check parallel teacher availability
+                                if s.get('parallel'):
+                                    par_t = (s.get('parallel_teacher') or '').strip()
+                                    if par_t and par_t not in ('', '—', '?'):
+                                        if not _teacher_free(par_t, d, pp):
+                                            continue
+                            main_flag = _is_main(sname, cn)
+                            cands.append((current, int(main_flag), sname, teacher, s))
+                        return cands
+
+                    placed = False
+                    for (same_day_ok, teacher_busy_ok) in [
+                        (False, False),   # Pass 1: strict
+                        (True,  False),   # Pass 2: allow same day
+                        (True,  True),    # Pass 3: allow any
+                    ]:
+                        cands = _build_candidates(same_day_ok, teacher_busy_ok)
+                        if not cands:
+                            continue
+                        # Sort: prefer main subjects, then by FEWEST already
+                        # placed (to spread periods evenly, avoid stacking)
+                        cands.sort(key=lambda x: (-x[1], x[0]))
+                        _, _, best_subj, best_teacher, best_s = cands[0]
+                        _place_cell(cn, d, pp, best_subj, best_teacher, best_s)
+                        placed = True
+                        break
+                    # If placed is still False after all passes, the slot remains
+                    # free — this can only happen if the class has zero subjects
+                    # configured (a data error caught by Step 2 validation).
+
+    def _reduce_one_period_legacy(self):
         """Legacy single-reduction helper — use _auto_reduce_stuck_periods instead."""
         results = self._auto_reduce_stuck_periods()
         if not results:
@@ -1813,14 +1945,40 @@ class TimetableEngine:
                                             ', '.join(busy_t)))
 
                 else:
-                    # ── Section B / A (or relaxed-C): standard single-slot placement ──
-                    # RULE1: last period first, iterate all days, then earlier periods
+                    # ── Section B / A (or relaxed-C): period-major + day preference ─
+                    # Algorithm:
+                    #   Pass 1 (Distribute): period-major but SKIP days where this
+                    #     subject already appears ceil(n/wdays) times.  This spreads
+                    #     periods across as many days as possible.
+                    #   Pass 2 (Fallback):   original period-major with no cap.
+                    #     Activates only for any periods left unplaced after Pass 1
+                    #     (teacher availability forces all remaining onto fewer days).
+                    #
+                    # Effect: good distribution when teacher has spread availability;
+                    # graceful degradation (minimal stacking) when teacher-constrained.
+
+                    _nat = max(1, min(2, (total_periods + wdays - 1) // wdays))
+
+                    def _subj_on_day(d_):
+                        return max(
+                            (sum(1 for pp in range(ppd)
+                                 if grid.get(cn_, [[]])[d_][pp] is not None
+                                 and grid[cn_][d_][pp].get('subject') == primary_subj)
+                             for cn_ in all_cn if cn_ in grid),
+                            default=0)
+
+                    # Pass 1: distribute — skip days already at cap
                     for p in range(ppd - 1, -1, -1):
                         if len(placed_slots) >= remaining:
                             break
-                        for d in range(wdays):
+                        # Sort days: fewer subject occurrences first
+                        day_order_p1 = sorted(range(wdays),
+                                              key=lambda d_: _subj_on_day(d_))
+                        for d in day_order_p1:
                             if len(placed_slots) >= remaining:
                                 break
+                            if _subj_on_day(d) >= _nat:
+                                continue   # skip: already at cap for this day
                             cls_ok = slot_is_free_for_classes(all_cn, d, p)
                             tch_ok = all_teachers_free(all_teachers_needed, d, p)
                             if cls_ok and tch_ok:
@@ -1831,7 +1989,8 @@ class TimetableEngine:
                                     busy_cn = [cn for cn in all_cn
                                                if cn in grid
                                                and grid[cn][d][p] is not None]
-                                    occupant = grid[busy_cn[0]][d][p] if busy_cn else {}
+                                    occupant = (grid[busy_cn[0]][d][p]
+                                                if busy_cn else {})
                                     last_fail_why = (
                                         '{} P{}: {} occupied by "{}"'.format(
                                             DAYS[d], p+1,
@@ -1844,6 +2003,39 @@ class TimetableEngine:
                                         '{} P{}: teacher {} busy'.format(
                                             DAYS[d], p+1,
                                             ', '.join(busy_t)))
+
+                    # Pass 2 (fallback): period-major, no daily cap
+                    if len(placed_slots) < remaining:
+                        for p in range(ppd - 1, -1, -1):
+                            if len(placed_slots) >= remaining:
+                                break
+                            for d in range(wdays):
+                                if len(placed_slots) >= remaining:
+                                    break
+                                cls_ok = slot_is_free_for_classes(all_cn, d, p)
+                                tch_ok = all_teachers_free(all_teachers_needed, d, p)
+                                if cls_ok and tch_ok:
+                                    place_slot(task, extra_par, d, p, class_info_map)
+                                    placed_slots.append((d, p))
+                                else:
+                                    if not cls_ok:
+                                        busy_cn = [cn for cn in all_cn
+                                                   if cn in grid
+                                                   and grid[cn][d][p] is not None]
+                                        occupant = (grid[busy_cn[0]][d][p]
+                                                    if busy_cn else {})
+                                        last_fail_why = (
+                                            '{} P{}: {} occupied by "{}"'.format(
+                                                DAYS[d], p+1,
+                                                ', '.join(busy_cn),
+                                                occupant.get('subject', '?')))
+                                    else:
+                                        busy_t = [t for t in all_teachers_needed
+                                                  if not teacher_free(t, d, p)]
+                                        last_fail_why = (
+                                            '{} P{}: teacher {} busy'.format(
+                                                DAYS[d], p+1,
+                                                ', '.join(busy_t)))
 
                 # ── Build result ──────────────────────────────────────────────
                 new_placed = len(placed_slots)
@@ -2258,114 +2450,141 @@ class TimetableEngine:
         # undo, leaving the HC1 task with remaining > 0.
         # ══════════════════════════════════════════════════════════════════════
         self._gen_prog("Stage 1 · Phase 1 — Placing Class Teacher subject periods…")
-        for task in tasks:
-            if task['priority'] != 'HC1':
-                continue
-            p_idx  = task['ct_period'] - 1          # 0-based period index (preferred)
-            pt     = (task.get('par_teach') or '').strip()
+
+        # ── Helper: evict a lower-priority task from (d, p) to free the slot ────
+        # Used when the parallel teacher of a CT subject is blocked at ct_period
+        # by a non-HC1 task that was placed earlier.  We unplace that task so the
+        # CT constraint can be honoured; Stage 2 will re-place the evicted task.
+        def _try_evict_for_parallel(par_teacher, d, p):
+            """
+            If par_teacher is busy at (d,p) due to a non-HC1 task, unplace that
+            task so the CT subject can be placed at the fixed ct_period.
+            Returns True if the slot was freed, False otherwise.
+            """
+            if g['t_free'](par_teacher, d, p):
+                return True   # already free
+            # Find which class has this teacher at (d,p)
+            for cn2 in g['all_classes']:
+                idx2 = g['task_at'][cn2][d][p]
+                if idx2 is None:
+                    continue
+                blocker = tasks[idx2]
+                # Only evict non-HC1 tasks (never move CT periods)
+                if blocker['priority'] == 'HC1':
+                    return False
+                if (blocker.get('teacher') == par_teacher or
+                        (blocker.get('par_teach') or '').strip() == par_teacher):
+                    self._gen_unplace(blocker, d, p)
+                    return True
+            return False
+
+        # Process HC1 tasks: parallel-CT tasks FIRST (most constrained), then
+        # non-parallel CT tasks.  This ensures the parallel teacher is committed
+        # to the correct slot before non-parallel CT tasks are placed.
+        hc1_tasks = [t for t in tasks if t['priority'] == 'HC1']
+        hc1_tasks.sort(key=lambda t: (
+            0 if (t.get('par_teach') or '').strip() not in ('', '—', '?') else 1
+        ))
+
+        for task in hc1_tasks:
+            p_idx = task['ct_period'] - 1          # 0-based period index (fixed)
+            pt    = (task.get('par_teach') or '').strip()
+            has_par = bool(pt and pt not in ('—', '?'))
+
+            # HC1 places at most wdays occurrences (one per working day) at p_idx.
+            # Any overflow (periods > wdays) is demoted to filler AFTER this loop.
+            days_to_place = min(task['remaining'], wdays)
 
             for d in range(wdays):
                 if task['remaining'] <= 0:
-                    break                           # all n periods placed — done
-
-                # Try preferred CT period first; if par_teach is busy there, scan
-                # all other periods (preserving the HC constraint that the primary
-                # teacher's period matches ct_period — we relax only for par_teach
-                # conflicts, which are an ordering artifact, not a data error).
-                candidates = [p_idx] + [p for p in range(ppd) if p != p_idx]
-
-                placed_this_day = False
-                for p_try in candidates:
-                    blocked_by = None
-                    for cn in task['cn_list']:
-                        existing = grid[cn][d][p_try]
-                        if existing is not None:
-                            blocked_by = (cn, existing)
-                            break
-
-                    if blocked_by is not None:
-                        if p_try == p_idx:
-                            # Only report issues for the preferred CT period
-                            cn_blk, cell_blk = blocked_by
-                            s1_issues.append(
-                                "HC1 — CT subject '{}' (teacher: {}, class: {}) "
-                                "could NOT be placed on {} at Period {} — "
-                                "cell already occupied by subject '{}' (teacher: {}).  "
-                                "Step 2 validation should have prevented this.".format(
-                                    task['subject'], task['teacher'],
-                                    ', '.join(task['cn_list']),
-                                    DAYS[d], p_idx + 1,
-                                    cell_blk.get('subject', '?'),
-                                    cell_blk.get('teacher', '?')))
-                        continue   # try next period
-
-                    # Cell(s) free — now check teacher availability
-                    t_blk = None
-                    if not g['t_free'](task['teacher'], d, p_try):
-                        t_blk = task['teacher']
-                    elif pt and pt not in ('—', '?') and not g['t_free'](pt, d, p_try):
-                        t_blk = pt
-
-                    if t_blk is not None:
-                        # Teacher busy — only skip silently (ordering artifact).
-                        # If it's the preferred CT period, log; other periods just skip.
-                        if p_try == p_idx:
-                            s1_issues.append(
-                                "HC1 — CT subject '{}' (teacher: {}, class: {}) "
-                                "could NOT be placed on {} at Period {} — "
-                                "teacher '{}' is already busy at that slot "
-                                "(parallel teacher conflict; will try alternative period).".format(
-                                    task['subject'], task['teacher'],
-                                    ', '.join(task['cn_list']),
-                                    DAYS[d], p_idx + 1, t_blk))
-                        continue   # try next period
-
-                    # All clear — place
-                    self._gen_place(task, d, p_try)
-                    placed_this_day = True
                     break
 
-            # If we couldn't place this day at ALL (rare: only when all periods are
-            # occupied AND teacher is busy everywhere) — skip silently; Force Fill
-            # will handle it.
+                # ── Step 1: try to place at the FIXED CT period (p_idx) ───────
+                # For parallel-CT subjects: if the parallel teacher is busy at
+                # p_idx due to a lower-priority task, evict that task first so
+                # the CT constraint is never broken.
+                cells_free_at_pidx = all(
+                    grid[cn][d][p_idx] is None for cn in task['cn_list'])
+                primary_free = g['t_free'](task['teacher'], d, p_idx)
 
-        # ── HC1 overflow: subjects with periods > wdays ──────────────────────
-        # If a CT subject has more periods than working days (e.g. 7 periods in 6
-        # days), the ct_period can only be used once per day and thus fills at most
-        # wdays slots.  Place any remaining overflow periods at the FIRST free
-        # period on any day that already has the subject once (same-day repeat).
+                if cells_free_at_pidx and primary_free:
+                    par_ok = True
+                    if has_par and not g['t_free'](pt, d, p_idx):
+                        # Parallel teacher blocked — try to evict the blocker
+                        par_ok = _try_evict_for_parallel(pt, d, p_idx)
+
+                    if par_ok:
+                        self._gen_place(task, d, p_idx)
+                        continue   # placed at fixed CT period ✓
+
+                    # ── Parallel teacher still blocked but CT is MANDATORY ────
+                    # The primary CT teacher is free and the cell is empty, but
+                    # the parallel teacher (e.g. IRFAN/URDU) cannot be freed.
+                    # Requirement: CT period must ALWAYS be placed.  Place the
+                    # primary teacher's subject SOLO (without the parallel teacher)
+                    # so the class-teacher duty is never missed.  The parallel
+                    # teacher's subject will be handled separately by Stage 2/3.
+                    if has_par:
+                        _sv_pt   = task['par_teach']
+                        _sv_ps   = task['par_subj']
+                        _sv_type = task['type']
+                        task['par_teach'] = ''
+                        task['par_subj']  = ''
+                        task['type']      = (
+                            'combined' if len(task['cn_list']) > 1 else 'normal')
+                        self._gen_place(task, d, p_idx)
+                        task['par_teach'] = _sv_pt
+                        task['par_subj']  = _sv_ps
+                        task['type']      = _sv_type
+                        continue   # placed solo at fixed CT period ✓
+
+                # ── Step 2: CT period blocked by grid cell or primary teacher ──
+                # Report the issue (this should not happen if Step 2 was correct).
+                if not cells_free_at_pidx:
+                    cn_blk  = next((cn for cn in task['cn_list']
+                                    if grid[cn][d][p_idx] is not None), None)
+                    cell_blk = grid[cn_blk][d][p_idx] if cn_blk else {}
+                    s1_issues.append(
+                        "HC1 — CT subject '{}' (teacher: {}, class: {}) "
+                        "could NOT be placed on {} at Period {} — "
+                        "cell already occupied by '{}' (teacher: {}).".format(
+                            task['subject'], task['teacher'],
+                            ', '.join(task['cn_list']),
+                            DAYS[d], p_idx + 1,
+                            cell_blk.get('subject', '?'),
+                            cell_blk.get('teacher', '?')))
+                elif not primary_free:
+                    s1_issues.append(
+                        "HC1 — CT subject '{}' (teacher: {}, class: {}) "
+                        "could NOT be placed on {} at Period {} — "
+                        "primary teacher '{}' is already busy at that slot.".format(
+                            task['subject'], task['teacher'],
+                            ', '.join(task['cn_list']),
+                            DAYS[d], p_idx + 1, task['teacher']))
+                # Do NOT fall back to another period for CT subjects — the CT
+                # period is a hard constraint.  Force Fill will handle any
+                # remaining unplaced occurrences.
+
+        # ── HC1 overflow: demote to HC2 or filler depending on p_pref ────────
+        # If a CT subject has more periods than working days (e.g. 12 periods in 6
+        # days), the HC1 phase above fills at most wdays slots (one per day at
+        # ct_period).  The remaining overflow periods are released from the CT pin.
+        #
+        # FIX (Issue 2): if the user set a preference period for the CT subject
+        # (p_pref non-empty), keep it as HC2 so HC2 placement puts the overflow
+        # at the preferred period every day — not scattered as plain filler.
+        # If no preference period is set, fall back to plain filler (old behaviour).
         for task in tasks:
             if task['priority'] != 'HC1' or task['remaining'] <= 0:
                 continue
-            # Overflow allowed only when periods > wdays
-            if task['periods'] <= wdays:
-                continue
-            pt = (task.get('par_teach') or '').strip()
-            for d in range(wdays):
-                if task['remaining'] <= 0:
-                    break
-                # Only double-up on a day that ALREADY has this subject once
-                cn0 = task['cn_list'][0]
-                already_today = any(
-                    grid[cn0][d][pp] is not None
-                    and grid[cn0][d][pp].get('subject') == task['subject']
-                    for pp in range(ppd)
-                )
-                if not already_today:
-                    continue
-                # Find the first free period today
-                for p_try in range(ppd):
-                    cells_free = all(
-                        grid[cn][d][p_try] is None for cn in task['cn_list'])
-                    if not cells_free:
-                        continue
-                    t_ok = g['t_free'](task['teacher'], d, p_try)
-                    if pt and pt not in ('—', '?') and not g['t_free'](pt, d, p_try):
-                        t_ok = False
-                    if not t_ok:
-                        continue
-                    self._gen_place(task, d, p_try)
-                    break
+            if task['periods'] > wdays:
+                task['is_ct'] = False   # no longer pinned to ct_period
+                if task['p_pref']:
+                    # User chose a preference period: honour it for overflow slots
+                    task['priority'] = 'HC2'
+                else:
+                    # No preference — place freely in Stage 2/3
+                    task['priority'] = 'filler'
 
         # ══════════════════════════════════════════════════════════════════════
         # PHASE 2 — HC2: Fixed / preference-constrained subjects
